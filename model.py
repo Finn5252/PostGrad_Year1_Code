@@ -130,7 +130,7 @@ class GCNSurrogate(nn.Module):
         blocks = [GCNBlock(2 * H if j == 0 else H, H) for j in range(cfg.n_gcn_blocks)]
         self.gcn_blocks = nn.ModuleList(blocks)
 
-        self.out.conv = GCNConv(H, cfg.n_outputs, add_self_loops = False
+        self.out.conv = GCNConv(H, cfg.n_outputs, add_self_loops = False)
 
     def forward(
         self,
@@ -142,37 +142,38 @@ class GCNSurrogate(nn.Module):
          cfg = self.cfg
          N = x.size(0)
 
-        if batch is None:
-            batch = x.new_zeros(N, dtype = torch.long)
-        if scalars.dim() == 1:
-            scalars = scalars.unsqueeze(0)
-        n_graphs = int(scalars.size(0))
+         if batch is None:
+             batch = x.new_zeros(N, dtype = torch.long)
+         if scalars.dim() == 1:
+             scalars = scalars.unsqueeze(0)
 
-        assert x.size(1) == cfg.n_node_features, (
-            f"expected {cfg.n_node_features} node features, got {x.size(1)}")
+         n_graphs = int(scalars.size(0))
 
-        assert scalars.size(1) == cfg.n_scalar_features, (
-            f"expected {cfg.n_scalar_features} scalars, got {scalars.size(1)}")
+         assert x.size(1) == cfg.n_node_features, (
+             f"expected {cfg.n_node_features} node features, got {x.size(1)}")
 
-        assert edge_index.dim() == 2 and edge_index.size(0) == 2, (
-            f"edge_index must be (2,E), got {tuple(edge_index.shape)}")
+         assert scalars.size(1) == cfg.n_scalar_features, (
+             f"expected {cfg.n_scalar_features} scalars, got {scalars.size(1)}")
 
-        C, S = x, scalars
-        Z: Optional[Tensor] = None
-        Q: optional[Tensor] = None
-        G: Optional[Tensor] = None
+         assert edge_index.dim() == 2 and edge_index.size(0) == 2, (
+             f"edge_index must be (2,E), got {tuple(edge_index.shape)}")
 
-        for block in self.shared_blocks:
-            C, S, G, T = block(C, S, Z, Q, edge_index, batch, n_graphs)
-            Z, Q = G, Tensor
+         C, S = x, scalars
+         Z: Optional[Tensor] = None
+         Q: Optional[Tensor] = None
+         G: Optional[Tensor] = None
 
-        h = C
-        for j, block in enumerate(self.gcn_blocks):
-            h = block(h, edge_index, skip = G if j == 0 else None)
+         for block in self.shared_blocks:
+             C, S, G, T = block(C, S, Z, Q, edge_index, batch, n_graphs)
+             Z, Q = G, Tensor
 
-        out = self.out_conv(h, edge_index) # no residual, no activation
+         h = C
+         for j, block in enumerate(self.gcn_blocks):
+             h = block(h, edge_index, skip = G if j == 0 else None)
 
-        assert out.shape == (N, cfg.n.outputs)
-        return out
-def count_parameters(model: nn.Module) -> int:
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+         out = self.out_conv(h, edge_index) # no residual, no activation
+
+         assert out.shape == (N, cfg.n.outputs)
+         return out
+    def count_parameters(model: nn.Module) -> int:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
