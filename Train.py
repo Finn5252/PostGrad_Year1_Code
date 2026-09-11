@@ -39,6 +39,7 @@ GCN_BLOCKS = 3
 ZERO_HANDLING = "mask"              
 ZERO_THRESHOLD = 1e-3
  
+LOG_TEST_EACH_EPOCH = False         
 
 SMOKE = False                       
 
@@ -47,22 +48,27 @@ SMOKE = False
 
 @dataclass
 class TrainConfig:
-    out_dir: str = "tuns/default"
-    epochs: int = 1000
-    batch_size: int = 1
-    lr: float = 1e-3
+    out_dir: str = OUT_DIR
+    epochs: int = EPOCHS
+    batch_size: int = BATCH_SIZE
+    lr: float = LR
     betas: tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 0.0
     lr_decay_rate: float = 0.9
     lr_decay_every_epochs: int = 200
-    early_stopping_patience: int = 200
+    early_stopping_patience: int = PATIENCE
     early_stopping_min_delta: float = 0.0
 
-    seed: int = 0
-    device: str = "cpu"
+    seed: int = SEED
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
     num_workers: int = 0
+    log_test_each_epoch: bool = LOG_TEST_EACH_EPOCH
 
-    relative_error: RelativeErrorConfig = field(default_factory = RelativeErrorConfig)
+    relative_error: RelativeErrorConfig = field(
+        default_factory = lambda: RelativeErrorConfig(
+            mode = ZERO_HANDLING, threshold = ZERO_THRESHOLD
+        )
+    )
 
 def set_seed(seed: int) -> None:
     random.seed(seed)
@@ -85,7 +91,7 @@ def run_epoch(model, loader, loss_fn, device, optimizer = None) -> float:
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
         for batch in loader:
-            pred, y = forward(model, batch, device)
+            pred, y = _forward(model, batch, device)
             loss = loss_fn(pred, y)
             if training:
                 optimizer.zero_grad(set_to_none = True)
@@ -93,21 +99,22 @@ def run_epoch(model, loader, loss_fn, device, optimizer = None) -> float:
                 optimizer.step()
             n_graphs = int(batch.num_graphs)
             acc.update(loss.item(), n = n_graphs)
-        return acc.mean
-@ torch.no_grad()
-def evaluate_relative_errors(model, loader, scalars: ScalarBundle, device: str, cfg: RelativeErrorConfig) -> dict:
+    return acc.mean
+
+@torch.no_grad()
+def evaluate_relative_errors(model, loader, scalers: ScalerBundle, device: str, cfg: RelativeErrorConfig) -> dict:
     "Relative L1/L2 on denormalised values, per target field"
     model.eval()
-    acc = RelativeErrorAccumulator(scalars.target_columns, cfg)
+    acc = RelativeErrorAccumulator(scalers.target_columns, cfg)
 
     for batch in loader:
-        y_true = scalars.target.inverse_transform(batch.y.to(device))
+        y_true = scalers.target.inverse_transform(batch.y.to(device))
         acc.update_scale(y_true)
     acc.lock_scale()
 
     for batch in loader:
-        pred, y = forward(model, batch, device)
-        acc.update(scalars.target.inverse_transform(pred), scalars.target.inverse_transform(y),)
+        pred, y = _forward(model, batch, device)
+        acc.update(scalers.target.inverse_transform(pred), scalers.target.inverse_transform(y),)
     return acc.result()
 
 # training
@@ -122,8 +129,8 @@ def train(
     set_seed(train_cfg.seed)
     device = train_cfg.device
 
-    train_ds, val_ds, test_ds, scalars, store = build_splits(data_cfg)
-    scalars.save(out / "scalars.json")
+    train_ds, val_ds, test_ds, scalers, store = build_splits(data_cfg)
+    scalers.save(out / "scalers.json")
 
     train_loader = DataLoader(train_ds, batch_size = train_cfg.batch_size, shuffle = True)
     val_loader = DataLoader(val_ds, batch_size = train_cfg.batch_size)
@@ -151,7 +158,8 @@ def train(
                 "model": _jsonable(asdict(model_cfg)),
                 "train": _jsonable(asdict(train_cfg)),
                 "n_parameters": count_parameters(model),
-            }  
+            },
+            indent = 2,
         )
     )
 
@@ -179,17 +187,6 @@ def train(
             )
             scheduler.step()
 
-            writer.writerow(
-                {
-                    "epoch": epoch,
-                    "lr": lr_now,
-                    "train_loss": train_loss,
-                    "val_loss": val_loss,
-                    "test_loss": test_loss,
-                }
-            )
-            fh.flush()
-            
             writer.writerow(
                 {
                     "epoch": epoch,
@@ -231,47 +228,47 @@ def train(
                 )
                 break
 
-        # single, final test evaluation on the best checkpoint
-        
-        if ckpt_path.exists():
-            model.load_state_dict(torch.load(ckpt_path, map_location = device)["model_state"])
-        model.eval()
+    # single, final test evaluation on the best checkpoint
 
-        results = {
-            "best_epoch": best_epoch,
-            "best_val_loss": best_val,
-            "wall_time_s": time.time() - t0,
-            "n_parameters": count_parameters(model),
-            "n_cases": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
-            "loss": {
-                "train": run_epoch(model, train_loader, loss_fn, device),
-                "val": run_epoch(model, val_loader, loss_fn, device),
-                "test": run_epoch(model, test_loader, loss_fn, device),
-            },
-            "relative_errors": {
-                split: evaluate_relative_errors(
-                    model, loader, scalars, device, train_cfg.relative_error
-                )
-                for split, loader in (
-                    ("train", train_loader), ("val", val_loader) ("test", test_loader)
-                )
-            },
-        }
-        (out / "results.json").write_text(json.dumps(results, indent = 2))
+    if ckpt_path.exists():
+        model.load_state_dict(torch.load(ckpt_path, map_location = device)["model_state"])
+    model.eval()
 
-        print(f"\n[train] best epoch {best_epoch} (val loss {best_val:.6e})")
-        print(f"[train] final test loss (evaluated once): {results['loss']['test']:.6e}")
-        for split in ("train", "val", "test"):
-            print(f"[train] relative errors ({split}):")
-            for name, r in results["relative_errors"][split].items():
-                print(
-                    f"    {name:<20} L1={r['L1']:.4f}  L2={r['L2']:.4f}  "
-                    f"excluded={r['excluded_fraction']:.3%}  ({r['handling']})"
-                )
-        print(f"[train] wrote {out}/results.json, history.csv, best.pt, scalers.json")
-        store.close()
-        return results
-    
+    results = {
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val,
+        "wall_time_s": time.time() - t0,
+        "n_parameters": count_parameters(model),
+        "n_cases": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
+        "loss": {
+            "train": run_epoch(model, train_loader, loss_fn, device),
+            "val": run_epoch(model, val_loader, loss_fn, device),
+            "test": run_epoch(model, test_loader, loss_fn, device),
+        },
+        "relative_errors": {
+            split: evaluate_relative_errors(
+                model, loader, scalers, device, train_cfg.relative_error
+            )
+            for split, loader in (
+                ("train", train_loader), ("val", val_loader), ("test", test_loader)
+            )
+        },
+    }
+    (out / "results.json").write_text(json.dumps(results, indent = 2))
+
+    print(f"\n[train] best epoch {best_epoch} (val loss {best_val:.6e})")
+    print(f"[train] final test loss (evaluated once): {results['loss']['test']:.6e}")
+    for split in ("train", "val", "test"):
+        print(f"[train] relative errors ({split}):")
+        for name, r in results["relative_errors"][split].items():
+            print(
+                f"    {name:<20} L1={r['L1']:.4f}  L2={r['L2']:.4f}  "
+                f"excluded={r['excluded_fraction']:.3%}  ({r['handling']})"
+            )
+    print(f"[train] wrote {out}/results.json, history.csv, best.pt, scalers.json")
+    store.close()
+    return results
+
 def _jsonable(obj):
     if isinstance(obj, dict):
         return {k: _jsonable(v) for k, v in obj.items()}
@@ -303,5 +300,3 @@ def main() -> dict:
  
 if __name__ == "__main__":
     main()
- 
-
