@@ -201,3 +201,107 @@ def train(
             )
             fh.flush()
 
+            # Selection and checkpointing look at the validation loss only
+            if val_loss < best_val - train_cfg.early_stopping_min_delta:
+                best_val, best_epoch = val_loss, epoch
+                epochs_since_improvement = 0
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state": model.state_dict(),
+                        "model_config": asdict(model_cfg),
+                        "val_loss": val_loss,
+                    },
+                    ckpt_path,
+                )
+            else:
+                epochs_since_improvement += 1
+
+            if epoch == 1 or epoch % 10 == 0 or epoch == train_cfg.epochs:
+                print(
+                    f"[{epoch:>4}/{train_cfg.epochs}] lr={lr_now:.2e} "
+                    f"train={train_loss:.6e} val={val_loss:.6e} "
+                    f"best_val={best_val:.6e}@{best_epoch}"
+                )
+
+            if epochs_since_improvement >= train_cfg.early_stopping_patience:
+                print(
+                    f"[train] early stopping at epoch {epoch}: no validation improvement "
+                    f"for {train_cfg.early_stopping_patience} epochs"
+                )
+                break
+
+        # single, final test evaluation on the best checkpoint
+        
+        if ckpt_path.exists():
+            model.load_state_dict(torch.load(ckpt_path, map_location = device)["model_state"])
+        model.eval()
+
+        results = {
+            "best_epoch": best_epoch,
+            "best_val_loss": best_val,
+            "wall_time_s": time.time() - t0,
+            "n_parameters": count_parameters(model),
+            "n_cases": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
+            "loss": {
+                "train": run_epoch(model, train_loader, loss_fn, device),
+                "val": run_epoch(model, val_loader, loss_fn, device),
+                "test": run_epoch(model, test_loader, loss_fn, device),
+            },
+            "relative_errors": {
+                split: evaluate_relative_errors(
+                    model, loader, scalars, device, train_cfg.relative_error
+                )
+                for split, loader in (
+                    ("train", train_loader), ("val", val_loader) ("test", test_loader)
+                )
+            },
+        }
+        (out / "results.json").write_text(json.dumps(results, indent = 2))
+
+        print(f"\n[train] best epoch {best_epoch} (val loss {best_val:.6e})")
+        print(f"[train] final test loss (evaluated once): {results['loss']['test']:.6e}")
+        for split in ("train", "val", "test"):
+            print(f"[train] relative errors ({split}):")
+            for name, r in results["relative_errors"][split].items():
+                print(
+                    f"    {name:<20} L1={r['L1']:.4f}  L2={r['L2']:.4f}  "
+                    f"excluded={r['excluded_fraction']:.3%}  ({r['handling']})"
+                )
+        print(f"[train] wrote {out}/results.json, history.csv, best.pt, scalers.json")
+        store.close()
+        return results
+    
+def _jsonable(obj):
+    if isinstance(obj, dict):
+        return {k: _jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_jsonable(v) for v in obj]
+    return obj
+
+def main() -> dict:
+    data_cfg = DataConfig(
+        h5_path=H5_PATH,
+        crop=CropBox(*CROP) if CROP else None,
+        knn_k=KNN_K,
+        cache_dir=CACHE_DIR,
+        split_seed=SEED,
+    )
+    model_cfg = GCNSurrogateConfig(
+        hidden=HIDDEN,
+        n_shared_blocks=SHARED_BLOCKS,
+        n_gcn_blocks=GCN_BLOCKS,
+        n_scalar_features=len(data_cfg.scalar_columns),
+        n_node_features=len(data_cfg.node_columns),
+        n_outputs=len(data_cfg.target_columns),
+    )
+    train_cfg = TrainConfig(
+        early_stopping_patience=10**9 if SMOKE else PATIENCE,
+    )
+    return train(data_cfg, model_cfg, train_cfg)
+ 
+ 
+if __name__ == "__main__":
+    main()
+ 
+
