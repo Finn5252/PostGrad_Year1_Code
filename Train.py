@@ -278,22 +278,22 @@ def _jsonable(obj):
 
 def main() -> dict:
     data_cfg = DataConfig(
-        h5_path=H5_PATH,
-        crop=CropBox(*CROP) if CROP else None,
-        knn_k=KNN_K,
-        cache_dir=CACHE_DIR,
-        split_seed=SEED,
+        h5_path = H5_PATH,
+        crop = CropBox(*CROP) if CROP else None,
+        knn_k = KNN_K,
+        cache_dir = CACHE_DIR,
+        split_seed = SEED,
     )
     model_cfg = GCNSurrogateConfig(
-        hidden=HIDDEN,
-        n_shared_blocks=SHARED_BLOCKS,
-        n_gcn_blocks=GCN_BLOCKS,
-        n_scalar_features=len(data_cfg.scalar_columns),
-        n_node_features=len(data_cfg.node_columns),
-        n_outputs=len(data_cfg.target_columns),
+        hidden = HIDDEN,
+        n_shared_blocks = SHARED_BLOCKS,
+        n_gcn_blocks = GCN_BLOCKS,
+        n_scalar_features = len(data_cfg.scalar_columns),
+        n_node_features = len(data_cfg.node_columns),
+        n_outputs = len(data_cfg.target_columns),
     )
     train_cfg = TrainConfig(
-        early_stopping_patience=10**9 if SMOKE else PATIENCE,
+        early_stopping_patience = 10**9 if SMOKE else PATIENCE,
     )
     return train(data_cfg, model_cfg, train_cfg)
  
