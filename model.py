@@ -37,49 +37,55 @@ class SharedBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.graph_in = graph_in
-        self.scalar_oin = scalar_in
+        self.scalar_in = scalar_in
         self.hidden = hidden
 
         self.conv = GCNConv(graph_in, hidden, add_self_loops = False)
         self.fc = nn.Linear(scalar_in, hidden)
         self.skip_graph = nn.Linear(skip_in, hidden) if skip_in is not None else None
         self.skip_scalar = nn.Linear(skip_in, hidden) if skip_in is not None else None
-        self.act = nn.RelU()
+        self.act = nn.ReLU()
 
-        def forward(
-                self,
-                C: Tensor,
-                S: Tensor,
-                Z: Optional[Tensor],
-                Q: Optional[Tensor],
-                edge_index: Tensor,
-                batch: Tensor,
-                n_graphs: int,
-        ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-            N = C.size(0)
-            assert C.size(1) == self.graph_in, (
-                f"scalar signal S has {S.size(1)} features, expected {self.scalar_in}")
-            assert S.size(0) == n_graphs, (
-                f"S has {S.size(0)} rows but the batch holds {n_graphs} graphs")
+    def forward(
+        self,
+        C: Tensor,
+        S: Tensor,
+        Z: Optional[Tensor],
+        Q: Optional[Tensor],
+        edge_index: Tensor,
+        batch: Tensor,
+        n_graphs: int,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        N = C.size(0)
+        assert C.size(1) == self.graph_in, (
+            f"graph signal C has {C.size(1)} features, expected {self.graph_in}"
+        )
+        assert S.size(1) == self.scalar_in, (
+            f"scalar signal S has {S.size(1)} features, expected {self.scalar_in}"
+        )
+        assert S.size(0) == n_graphs, (
+            f"S has {S.size(0)} rows but the batch holds {n_graphs} graphs"
+        )
 
-            G = self.conv(C, edge_index)
-            if self.skip_graph is not None:
-                G = G + self.skip_graph(Z)
-            G = self.act(G)
+        G = self.conv(C, edge_index)
+        if self.skip_graph is not None:
+            G = G + self.skip_graph(Z)
+        G = self.act(G)
 
-            T = self.fc(S)
-            if self.skip_scalar is not None:
-                T = T + self.skip_scalar(Q)
-            T = self.act(T)
+        T = self.fc(S)
+        if self.skip_scalar is not None:
+            T = T + self.skip_scalar(Q)
+        T = self.act(T)
 
-            P = global_mean_pool (G, batch, size = n_graphs)
-            S_next = P + T
-            U = S_next[batch]
-            C_next = torch.cat([G, U], dim=-1)
+        P = global_mean_pool (G, batch, size = n_graphs)
+        S_next = P + T
+        U = S_next[batch]
+        C_next = torch.cat([G, U], dim=-1)
 
-            assert C_next.shape == (N, 2 * self.hidden), (
-                f"C_next has shape {tuple(C_next.shape)}, expected ({N}, {2 * self.hidden})")
-            return C_next, S_next, G, T
+        assert C_next.shape == (N, 2 * self.hidden), (
+            f"C_next has shape {tuple(C_next.shape)}, expected ({N}, {2 * self.hidden})"
+        )
+        return C_next, S_next, G, T
 
 class GCNBlock(nn.Module):
     "Residual GCN block: H = ReLU(GCNConv(H) + skip)"
@@ -89,7 +95,7 @@ class GCNBlock(nn.Module):
         self.in_dim = in_dim
         self.hidden = hidden
         self.conv = GCNConv(in_dim, hidden, add_self_loops = False)
-        self.act = nn.ReLu()
+        self.act = nn.ReLU()
 
     def forward(
             self,
@@ -99,10 +105,12 @@ class GCNBlock(nn.Module):
     ) -> Tensor:
         N = H.size(0)
         assert H.size(1) == self.in_dim, (
-            f"GCN block input has {H.size(1)} features, expected {self.in_dim}")
+            f"GCN block input has {H.size(1)} features, expected {self.in_dim}"
+        )
         res = H if skip is None else skip
         assert res.size(1) == self.hidden, (
-            f"residual has {res.size(1)} features, expected {self.hidden}")
+            f"residual has {res.size(1)} features, expected {self.hidden}"
+        )
         out = self.act(self.conv(H, edge_index) + res)
         assert out.shape == (N, self.hidden)
         return out
@@ -130,7 +138,7 @@ class GCNSurrogate(nn.Module):
         blocks = [GCNBlock(2 * H if j == 0 else H, H) for j in range(cfg.n_gcn_blocks)]
         self.gcn_blocks = nn.ModuleList(blocks)
 
-        self.out.conv = GCNConv(H, cfg.n_outputs, add_self_loops = False)
+        self.out_conv = GCNConv(H, cfg.n_outputs, add_self_loops = False)
 
     def forward(
         self,
@@ -150,13 +158,16 @@ class GCNSurrogate(nn.Module):
          n_graphs = int(scalars.size(0))
 
          assert x.size(1) == cfg.n_node_features, (
-             f"expected {cfg.n_node_features} node features, got {x.size(1)}")
+             f"expected {cfg.n_node_features} node features, got {x.size(1)}"
+        )
 
          assert scalars.size(1) == cfg.n_scalar_features, (
-             f"expected {cfg.n_scalar_features} scalars, got {scalars.size(1)}")
+             f"expected {cfg.n_scalar_features} scalars, got {scalars.size(1)}"
+        )
 
          assert edge_index.dim() == 2 and edge_index.size(0) == 2, (
-             f"edge_index must be (2,E), got {tuple(edge_index.shape)}")
+             f"edge_index must be (2,E), got {tuple(edge_index.shape)}"
+        )
 
          C, S = x, scalars
          Z: Optional[Tensor] = None
@@ -165,7 +176,7 @@ class GCNSurrogate(nn.Module):
 
          for block in self.shared_blocks:
              C, S, G, T = block(C, S, Z, Q, edge_index, batch, n_graphs)
-             Z, Q = G, Tensor
+             Z, Q = G, T
 
          h = C
          for j, block in enumerate(self.gcn_blocks):
@@ -173,7 +184,8 @@ class GCNSurrogate(nn.Module):
 
          out = self.out_conv(h, edge_index) # no residual, no activation
 
-         assert out.shape == (N, cfg.n.outputs)
+         assert out.shape == (N, cfg.n_outputs)
          return out
-    def count_parameters(model: nn.Module) -> int:
-        return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+def count_parameters(model: nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
