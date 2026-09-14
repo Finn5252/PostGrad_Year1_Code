@@ -23,7 +23,7 @@ class MeanAccumulator:
 
     def update(self, value: float, n: int = 1) -> None:
         self.total += float(value) * n
-        self,count += n
+        self.count += n
 
     @property
     def mean(self) -> float:
