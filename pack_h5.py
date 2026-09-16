@@ -14,12 +14,12 @@ import pandas as pd
 
 # settings
 
-CSV_DIR = Path("exports/cases")
+CSV_DIR = Path(r"C:\exports")
 CSV_GLOB = "*.csv"
-PARAM_TABLE = Path("exports/design_points.csv")
-OUT_PATH = Path("data/hydrofoil.h5")
+PARAM_TABLE = Path(r"C:\Users\26664984\Documents\Masters\Simulations\parameter set.csv")
+OUT_PATH = Path(r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5")
 
-LIMIT: Optional[int] = 5 # pilot processing
+LIMIT: Optional[int] = None # pilot processing
 
 DP_ID_FROM_FILENAME = r"(\d+)"
 
@@ -27,13 +27,14 @@ PARAM_SEP = ","
 PARAM_DECIMAL = "."
 
 MIN_ROWS_PER_CASE = 1000
+EXCLUDE_DP_IDS = {0}    # DP 0 is the Workbench base design point, not part of the DOE
 PROGRESS_EVERY = 25
 
 CSV_HEADER = ["cellnumber", "x-coordinate", "y-coordinate", "velocity-magnitude", "pressure", "cell-volume", "y-coordinate", "x-coordinate",]
 USE_COLS = [0, 1, 2, 3, 4, 5]
 
 NODE_COLUMNS = ["x", "y", "cell_volume"]
-TARGET_COLUMNS = ["statice_pressure", "velocity_magnitude"]
+TARGET_COLUMNS = ["static_pressure", "velocity_magnitude"]
 SCALAR_COLUMNS = ["m", "p", "t", "AoA", "V_in"]
 
 PARAM_MAP = {"P1": "m", "P2": "p", "P3": "t", "P4": "AoA", "P18": "V_in"}
@@ -86,10 +87,11 @@ def load_param_table() -> dict[int, np.ndarray]:
         sep = PARAM_SEP,
         decimal = PARAM_DECIMAL,
         header = 0,
+        comment = "#",
         encoding = "utf-8-sig",
         skipinitialspace = True,
     )
-    frame.columns = [str(c).strip() for c in frame.columns]   # '# ' has a trailing space
+    frame.columns = [str(c).strip() for c in frame.columns]   
     columns = list(frame.columns)
  
     resolved = {}
@@ -120,8 +122,10 @@ def load_param_table() -> dict[int, np.ndarray]:
             f"Check PARAM_SEP={PARAM_SEP!r} and PARAM_DECIMAL={PARAM_DECIMAL!r}."
         )
  
-    return {i: values[k].astype(np.float32) for k, i in enumerate(ids)}
- 
+    table = {i: values[k].astype(np.float32) for k, i in enumerate(ids)}
+    for i in EXCLUDE_DP_IDS:
+        table.pop(i, None)
+    return table 
  
 def discover_cases() -> dict[int, Path]:
     if not CSV_DIR.is_dir():
@@ -139,6 +143,8 @@ def discover_cases() -> dict[int, Path]:
         if dp_id in mapping:
             fail(f"dp {dp_id} extracted from both {mapping[dp_id].name} and {path.name}")
         mapping[dp_id] = path
+    for i in EXCLUDE_DP_IDS:
+        mapping.pop(i, None)    
     return mapping
 
 # writing
