@@ -8,13 +8,6 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-# loss
-
-class HalfMeanSquaredError(nn.Module):
-    def forward(self, pred: Tensor, target: Tensor) -> Tensor:
-        if pred.shape != target.shape:
-            raise ValueError(f"shape mismatch: {tuple(pred.shape)} vs {tuple(target.shape)}")
-        return 0.5 * (pred - target).pow(2).mean()
 class MeanAccumulator:
     "Unweighted mean over cases"
     def __init__(self) -> None:

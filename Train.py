@@ -11,10 +11,11 @@ from typing import Optional
 
 import numpy as np
 import torch
+import torch.nn as nn
 from torch_geometric.loader import DataLoader
 
 from data import CropBox, DataConfig, ScalerBundle, build_splits
-from metrics import (HalfMeanSquaredError, MeanAccumulator, RelativeErrorAccumulator, RelativeErrorConfig)
+from metrics import (MeanAccumulator, RelativeErrorAccumulator, RelativeErrorConfig)
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 
 #settings:
@@ -139,7 +140,7 @@ def train(
     model = GCNSurrogate(model_cfg).to(device)
     print(f"[train] {count_parameters(model):,} trainable parameters on {device}")
 
-    loss_fn = HalfMeanSquaredError()
+    loss_fn = lambda pred, target: 0.5 * nn.functional.mse_loss(pred, target)
     optimizer = torch.optim.Adam(
         model.parameters(), 
         lr = train_cfg.lr,

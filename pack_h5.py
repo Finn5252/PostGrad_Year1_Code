@@ -29,9 +29,7 @@ PARAM_DECIMAL = "."
 MIN_ROWS_PER_CASE = 1000
 PROGRESS_EVERY = 25
 
-CSV_HEADER = [
-    "cellnumber", "x-coordinate", "y-coordinate", "velocity-magnitude", "pressure", "cell-volume", "y-coordinate", x-coordinate",
-]
+CSV_HEADER = ["cellnumber", "x-coordinate", "y-coordinate", "velocity-magnitude", "pressure", "cell-volume", "y-coordinate", "x-coordinate",]
 USE_COLS = [0, 1, 2, 3, 4, 5]
 
 NODE_COLUMNS = ["x", "y", "cell_volume"]
