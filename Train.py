@@ -20,8 +20,8 @@ from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 
 #settings:
 
-H5_PATH = r"data/hydrofoil.h5"      
-OUT_DIR = "runs/run1"               
+H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"      
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\iter1"               
  
 CROP = (-0.5, 2.0, 0.6, 1.4)        
 KNN_K = 4
