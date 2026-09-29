@@ -13,16 +13,20 @@ RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 
-GRID_N = 400  # interpolation grid resolution along x
-SMOOTH_SIGMA = 1.0  # gaussian smoothing o
+GRID_N = 400 # interpolation grid resolution along x
+SMOOTH_SIGMA = 1.0  # gaussian smoothing of the interpolated grid
 N_CONTOURS = 20
+OVERLAY_EVERY = 2 #every Nth contour level in the overlay panel
 
-MASK_RADIUS = 0.01  # grid points further than this from any cell centre are masked
+ZERO_THRESHOLD = 1e-12  # near-zero floor for the relative L1/L2
+ZERO_MODE = "absolute"  
+
+MASK_RADIUS = 0.01      # grid points further than this from any cell centre are masked
 
 DPI = 150
 
 FIELD_LABELS = {
-    "static_pressure": ("Pressure", "kPa", 1e-3),      
+    "static_pressure": ("Pressure", "kPa", 1e-3),      # name, unit, scale factor
     "velocity_magnitude": ("Velocity magnitude", "m/s", 1.0),
 }
 
@@ -50,7 +54,8 @@ def to_grid(x, y, values):
 
     ZI = griddata((x, y), values, (XI, YI), method = "linear")
 
-    # Mask grid points with no nearby data
+    # Mask grid points with no nearby data: the foil interior, and the corners where the
+    # crop box does not quite reach.
     from scipy.spatial import cKDTree
     tree = cKDTree(np.stack([x, y], axis = 1))
     dist, _ = tree.query(np.stack([XI.ravel(), YI.ravel()], axis = 1))
@@ -101,11 +106,13 @@ def plot_contours(case: dict, field_index: int) -> None:
         a.set_aspect("equal")
         fig.colorbar(cf, ax = a, label = f"{label} [{unit}]" if unit else label)
 
-    # overlay two sets of contour lines on the same axes
-    cp = ax[2].contour(XI, YI, ZT, levels = levels, colors = "k", linewidths = 0.8)
-    ax[2].contour(XI, YI, ZP, levels = levels, colors = "r", linewidths = 0.8,
+    # overlay: the two sets of contour lines on the same axes
+    sparse = levels[::OVERLAY_EVERY]
+    ax[2].contour(XI, YI, ZT, levels = sparse, colors = "k", linewidths = 0.8)
+    ax[2].contour(XI, YI, ZP, levels = sparse, colors = "r", linewidths = 0.8,
                   linestyles = "dashed")
-    ax[2].set_title("Overlay -- black: CFD, red dashed: predicted")
+    ax[2].set_title(f"Overlay -- black: CFD, red dashed: predicted "
+                    f"(every {OVERLAY_EVERY}nd level)")
     ax[2].set_xlabel("x")
     ax[2].set_ylabel("y")
     ax[2].set_aspect("equal")
@@ -119,7 +126,7 @@ def plot_contours(case: dict, field_index: int) -> None:
 
 
 def plot_error(case: dict, field_index: int) -> None:
-    "Signed difference and relative error, with per-case L1 / L2 annotated"
+    "Signed difference and relative error"
     name = case["target_columns"][field_index]
     label, unit, scale = FIELD_LABELS.get(name, (name, "", 1.0))
 
@@ -128,7 +135,8 @@ def plot_error(case: dict, field_index: int) -> None:
     diff = pred - true
 
     rms = float(np.sqrt((true**2).mean()))
-    keep = np.abs(true) > 1e-2 * rms          # same handling as metrics.py
+    thr = ZERO_THRESHOLD if ZERO_MODE == "absolute" else ZERO_THRESHOLD * rms
+    keep = np.abs(true) > thr
     ratio = np.abs(diff[keep]) / np.abs(true[keep])
     l1 = float(ratio.mean())
     l2 = float(np.sqrt((ratio**2).mean()))
@@ -149,11 +157,11 @@ def plot_error(case: dict, field_index: int) -> None:
     XI, YI, ZR = to_grid(case["x"], case["y"], rel)
     cf = ax[1].contourf(XI, YI, ZR, levels = np.linspace(0, min(np.nanmax(ZR), 50), 26),
                         cmap = "magma_r", extend = "max")
-    ax[1].set_title(
-        f"Relative error   L1 = {l1:.4f}   L2 = {l2:.4f}   "
-        f"({excluded:.2%} of nodes excluded, |phi| < 0.01 x field RMS)"
-    )
+    ax[1].set_title(f"Relative error   L1 = {l1:.4f}   L2 = {l2:.4f}")
     fig.colorbar(cf, ax = ax[1], label = "relative error [%]")
+    ax[1].text(0.01, -0.22, f"|phi| > {thr:g} ({ZERO_MODE}), "
+               f"{excluded:.2%} of nodes excluded",
+               transform = ax[1].transAxes, fontsize = 8, color = "0.35")
 
     for a in ax:
         a.set_ylabel("y")
