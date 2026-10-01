@@ -33,7 +33,7 @@ class RelativeErrorConfig:
     threshold: float = 1e-3
 
     def describe(self) -> str:
-        unit = "x fielf RMS" if self.threshold_mode == "relative_rms" else "(absolute)"
+        unit = "x field RMS" if self.threshold_mode == "relative_rms" else "(absolute)"
         return f"{self.mode}, |phi| < {self.threshold:g} {unit}"
 
 class RelativeErrorAccumulator:
@@ -124,7 +124,68 @@ class RelativeErrorAccumulator:
                 "handling": self.cfg.describe(),
             }
         return out
- 
+
+# NMAPE
+
+class NMAPEAccumulator:
+    "Normalised mean absolute percentage error, per target field"
+
+    def __init__(self, field_names: Sequence[str]) -> None:
+        self.field_names = list(field_names)
+        d = len(self.field_names)
+        self._sum = np.zeros(d)
+        self._count = np.zeros(d, dtype = np.int64)
+        self._max = np.zeros(d)
+
+    def update(
+        self,
+        pred: Tensor | np.ndarray,
+        target: Tensor | np.ndarray,
+        reference: Sequence[float],
+    ) -> None:
+        p, t = _to_numpy(pred), _to_numpy(target)
+        if p.shape != t.shape:
+            raise ValueError(f"shape mismatch: {p.shape} vs {t.shape}")
+        ref = np.asarray(reference, dtype = np.float64)
+        if ref.shape != (len(self.field_names),):
+            raise ValueError(
+                f"expected {len(self.field_names)} reference values, got {ref.shape}"
+            )
+        if np.any(ref <= 0) or not np.all(np.isfinite(ref)):
+            raise ValueError(f"reference values must be positive and finite, got {ref}")
+
+        rel = np.abs(p - t) / ref
+        self._sum += rel.sum(axis = 0)
+        self._count += p.shape[0]
+        self._max = np.maximum(self._max, rel.max(axis = 0))
+
+    def result(self) -> dict[str, dict[str, float]]:
+        out: dict[str, dict[str, float]] = {}
+        for j, name in enumerate(self.field_names):
+            n = int(self._count[j])
+            out[name] = {
+                "NMAPE": float(100.0 * self._sum[j] / n) if n else float("nan"),
+                "max_percent": float(100.0 * self._max[j]),
+                "n_nodes": n,
+            }
+        return out
+
+
+def reference_values(
+    v_in: float, field_names: Sequence[str], rho: float = 1025.0
+) -> np.ndarray:
+    "Per-case NMAPE denominators. Velocity is normalised by the inlet velocity, pressure by the dynamic pressure, since the outlet static pressure is zero."
+    dynamic = 0.5 * rho * v_in**2
+    lookup = {
+        "velocity_magnitude": v_in,
+        "static_pressure": dynamic,
+    }
+    missing = [n for n in field_names if n not in lookup]
+    if missing:
+        raise KeyError(f"no NMAPE reference defined for field(s) {missing}")
+    return np.array([lookup[n] for n in field_names], dtype = np.float64)
+
+
 def _to_numpy(a) -> np.ndarray:
     if isinstance(a, torch.Tensor):
         a = a.detach().cpu().numpy()
