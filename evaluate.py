@@ -14,17 +14,20 @@ from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 
 # settings
 
-RUN_DIR = Path("runs/run1")
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"
 
 SPLIT = "test" # "train", "val" or "test"
 THRESHOLDS = [1e-4, 1e-3, 1e-2, 5e-2, 1e-1]
-MODE = "mask"  # "mask" or "floor"
+MODE = "mask"  # floor
 
 RHO = 1025.0 # working fluid density for the NMAPE reference
 
 EXPORT_CASES = 3               
 EXPORT_DIR = RUN_DIR / "fields"
+
+PARITY_ALL = True # predicted vs actual for every test case
+PARITY_STRIDE = 10            
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -81,7 +84,7 @@ def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConf
 
 @torch.no_grad()
 def nmape(model, loader, scalers: ScalerBundle) -> dict:
-    "Normalised by a per-case reference rather than the local value: no singularity"
+    "Normalised by a per-case reference"
     acc = NMAPEAccumulator(scalers.target_columns)
     v_index = list(scalers.scalar_columns).index("V_in")
 
@@ -92,7 +95,7 @@ def nmape(model, loader, scalers: ScalerBundle) -> dict:
         y_true = scalers.target.inverse_transform(batch.y)
         scalars_phys = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())
 
-        # one graph at a time, since the reference differs per case
+        # one graph at a time
         offset = 0
         for g in range(scalars_phys.shape[0]):
             n = int((batch.batch == g).sum().item())
@@ -134,6 +137,38 @@ def export_fields(model, dataset, scalers: ScalerBundle, n_cases: int) -> None:
               + f" -> {out.name}")
 
 
+@torch.no_grad()
+def export_parity(model, loader, scalers: ScalerBundle, path: Path, stride: int) -> None:
+    "Predicted and actual for every case in the split"
+    preds, trues, cambers, dp_ids = [], [], [], []
+    m_index = list(scalers.scalar_columns).index("m")
+
+    for batch in loader:
+        batch = batch.to(DEVICE)
+        pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
+        p = scalers.target.inverse_transform(pred).cpu().numpy()[::stride]
+        t = scalers.target.inverse_transform(batch.y).cpu().numpy()[::stride]
+        s = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())
+
+        preds.append(p.astype(np.float32))
+        trues.append(t.astype(np.float32))
+        cambers.append(np.full(p.shape[0], s[0, m_index], dtype = np.float32))
+        dp_ids.append(int(batch.dp_id[0].item()))
+
+    pred_all = np.concatenate(preds)
+    np.savez_compressed(
+        path,
+        pred = pred_all,
+        true = np.concatenate(trues),
+        camber = np.concatenate(cambers),
+        dp_ids = np.asarray(dp_ids, dtype = np.int64),
+        stride = stride,
+        target_columns = np.array(scalers.target_columns, dtype = object),
+    )
+    print(f"[eval] parity: {len(dp_ids)} cases, {pred_all.shape[0]:,} points per field "
+          f"(every {stride}th node) -> {path.name}")
+
+
 def main() -> None:
     model, data_cfg, saved = load_run()
 
@@ -167,21 +202,15 @@ def main() -> None:
                      f"{r['excluded_fraction']:>6.2%}")
         print(line)
     print("=" * 78)
-    print("If L2 falls sharply as the threshold rises while L1 barely moves, the L2")
-    print("figure is dominated by a few near-zero denominators rather than by the")
-    print("model's accuracy over the field.")
 
     nm = nmape(model, loader, scalers)
     print("\n" + "=" * 78)
-    print(f"NMAPE ({SPLIT} split) -- normalised by V_in (velocity) and "
-          f"0.5*rho*V_in^2 (pressure)")
+    print(f"NMAPE ({SPLIT} split)")
     print("=" * 78)
     for name, r in nm.items():
         print(f"  {name:<20} NMAPE = {r['NMAPE']:>7.3f}%   "
               f"worst node = {r['max_percent']:.2f}%")
     print("=" * 78)
-    print("No threshold, no singularity -- this number does not move if you change")
-    print("the near-zero handling.")
 
     (RUN_DIR / f"nmape_{SPLIT}.json").write_text(json.dumps(nm, indent = 2))
 
@@ -189,9 +218,14 @@ def main() -> None:
         json.dumps({f"{thr:g}": r for thr, r in rows}, indent = 2)
     )
 
+    print()
     if EXPORT_CASES:
-        print()
         export_fields(model, dataset, scalers, EXPORT_CASES)
+
+    if PARITY_ALL:
+        EXPORT_DIR.mkdir(parents = True, exist_ok = True)
+        export_parity(model, loader, scalers,
+                      RUN_DIR / f"parity_{SPLIT}.npz", PARITY_STRIDE)
 
     store.close()
 
