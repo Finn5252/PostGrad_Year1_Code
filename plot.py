@@ -29,7 +29,7 @@ DPI = 150
 
 # name, unit, scale factor, colour map
 FIELD_LABELS = {
-    "static_pressure": ("Pressure", "kPa", 1e-3, "autumn_r"),
+    "static_pressure": ("Pressure", "kPa", 1e-3, "autumn"),
     "velocity_magnitude": ("Velocity magnitude", "m/s", 1.0, "viridis"),
 }
 DEFAULT_FIELD = ("", "", 1.0, "viridis")
