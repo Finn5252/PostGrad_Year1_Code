@@ -1,20 +1,3 @@
-"""Load a trained checkpoint and evaluate it without retraining.
-
-Two things:
-
-  * sweeps the near-zero threshold used by the relative L1/L2 metrics, so you can see
-    how much of the reported error comes from nodes whose true value sits close to zero
-    (velocity at the stagnation point, pressure where it crosses zero);
-  * writes denormalized predicted and actual fields for chosen cases to .npz, ready for
-    contour plotting.
-
-The DataConfig here must match the one the run was trained with, or the splits will
-differ and the "test" set will not be the same cases. The values are read back from the
-run's config.json where possible.
-
-Run:  python evaluate.py
-"""
-
 from __future__ import annotations
 
 import json
@@ -25,19 +8,22 @@ import torch
 from torch_geometric.loader import DataLoader
 
 from data import CropBox, DataConfig, ScalerBundle, build_splits
-from metrics import RelativeErrorAccumulator, RelativeErrorConfig
+from metrics import (NMAPEAccumulator, RelativeErrorAccumulator, RelativeErrorConfig,
+                     reference_values)
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
+RUN_DIR = Path("runs/run1")
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"
 
-SPLIT = "test"                  # "train", "val" or "test"
+SPLIT = "test" # "train", "val" or "test"
 THRESHOLDS = [1e-4, 1e-3, 1e-2, 5e-2, 1e-1]
-MODE = "mask"                   # "mask" or "floor"
+MODE = "mask"  # "mask" or "floor"
 
-EXPORT_CASES = 3                # write this many cases' fields to .npz; 0 to skip
+RHO = 1025.0 # working fluid density for the NMAPE reference
+
+EXPORT_CASES = 3               
 EXPORT_DIR = RUN_DIR / "fields"
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -90,6 +76,30 @@ def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConf
             scalers.target.inverse_transform(pred),
             scalers.target.inverse_transform(batch.y),
         )
+    return acc.result()
+
+
+@torch.no_grad()
+def nmape(model, loader, scalers: ScalerBundle) -> dict:
+    "Normalised by a per-case reference rather than the local value: no singularity"
+    acc = NMAPEAccumulator(scalers.target_columns)
+    v_index = list(scalers.scalar_columns).index("V_in")
+
+    for batch in loader:
+        batch = batch.to(DEVICE)
+        pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
+        y_pred = scalers.target.inverse_transform(pred)
+        y_true = scalers.target.inverse_transform(batch.y)
+        scalars_phys = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())
+
+        # one graph at a time, since the reference differs per case
+        offset = 0
+        for g in range(scalars_phys.shape[0]):
+            n = int((batch.batch == g).sum().item())
+            ref = reference_values(float(scalars_phys[g, v_index]),
+                                   scalers.target_columns, rho = RHO)
+            acc.update(y_pred[offset:offset + n], y_true[offset:offset + n], ref)
+            offset += n
     return acc.result()
 
 
@@ -160,6 +170,20 @@ def main() -> None:
     print("If L2 falls sharply as the threshold rises while L1 barely moves, the L2")
     print("figure is dominated by a few near-zero denominators rather than by the")
     print("model's accuracy over the field.")
+
+    nm = nmape(model, loader, scalers)
+    print("\n" + "=" * 78)
+    print(f"NMAPE ({SPLIT} split) -- normalised by V_in (velocity) and "
+          f"0.5*rho*V_in^2 (pressure)")
+    print("=" * 78)
+    for name, r in nm.items():
+        print(f"  {name:<20} NMAPE = {r['NMAPE']:>7.3f}%   "
+              f"worst node = {r['max_percent']:.2f}%")
+    print("=" * 78)
+    print("No threshold, no singularity -- this number does not move if you change")
+    print("the near-zero handling.")
+
+    (RUN_DIR / f"nmape_{SPLIT}.json").write_text(json.dumps(nm, indent = 2))
 
     (RUN_DIR / f"threshold_sweep_{SPLIT}.json").write_text(
         json.dumps({f"{thr:g}": r for thr, r in rows}, indent = 2)
