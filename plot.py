@@ -14,12 +14,10 @@ FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 
 GRID_N = 400 # interpolation grid resolution along x
-SMOOTH_SIGMA = 1.0  # gaussian smoothing of the interpolated grid
+SMOOTH_SIGMA = 1.0      # gaussian smoothing of the interpolated grid, in grid cell
 N_CONTOURS = 20
-OVERLAY_EVERY = 2 #every Nth contour level in the overlay panel
 
-ZERO_THRESHOLD = 1e-12  # near-zero floor for the relative L1/L2
-ZERO_MODE = "absolute"  
+RHO = 1025.0 # fluid density for the NMAPE reference
 
 MASK_RADIUS = 0.01      # grid points further than this from any cell centre are masked
 
@@ -96,7 +94,7 @@ def plot_contours(case: dict, field_index: int) -> None:
     XI, YI, ZP = to_grid(case["x"], case["y"], pred)
     _, _, ZT = to_grid(case["x"], case["y"], true)
 
-    fig, ax = plt.subplots(3, 1, figsize = (9, 10), sharex = True, sharey = True)
+    fig, ax = plt.subplots(2, 1, figsize = (9, 7), sharex = True, sharey = True)
 
     for a, Z, title in ((ax[0], ZP, "Predicted"), (ax[1], ZT, "Actual (CFD)")):
         cf = a.contourf(XI, YI, Z, levels = levels, cmap = "viridis", extend = "both")
@@ -106,16 +104,8 @@ def plot_contours(case: dict, field_index: int) -> None:
         a.set_aspect("equal")
         fig.colorbar(cf, ax = a, label = f"{label} [{unit}]" if unit else label)
 
-    # overlay: the two sets of contour lines on the same axes
-    sparse = levels[::OVERLAY_EVERY]
-    ax[2].contour(XI, YI, ZT, levels = sparse, colors = "k", linewidths = 0.8)
-    ax[2].contour(XI, YI, ZP, levels = sparse, colors = "r", linewidths = 0.8,
-                  linestyles = "dashed")
-    ax[2].set_title(f"Overlay -- black: CFD, red dashed: predicted "
-                    f"(every {OVERLAY_EVERY}nd level)")
-    ax[2].set_xlabel("x")
-    ax[2].set_ylabel("y")
-    ax[2].set_aspect("equal")
+    # overlay the two sets of contour lines on the same axes
+    ax[1].set_xlabel("x")
 
     fig.suptitle(f"{label} -- {case_title(case)}", fontsize = 10)
     fig.tight_layout()
@@ -126,54 +116,43 @@ def plot_contours(case: dict, field_index: int) -> None:
 
 
 def plot_error(case: dict, field_index: int) -> None:
-    "Signed difference and relative error"
+    "Signed difference, with the case NMAPE annotated"
     name = case["target_columns"][field_index]
     label, unit, scale = FIELD_LABELS.get(name, (name, "", 1.0))
 
-    pred = case["pred"][:, field_index] * scale
-    true = case["true"][:, field_index] * scale
-    diff = pred - true
+    pred = case["pred"][:, field_index]
+    true = case["true"][:, field_index]
 
-    rms = float(np.sqrt((true**2).mean()))
-    thr = ZERO_THRESHOLD if ZERO_MODE == "absolute" else ZERO_THRESHOLD * rms
-    keep = np.abs(true) > thr
-    ratio = np.abs(diff[keep]) / np.abs(true[keep])
-    l1 = float(ratio.mean())
-    l2 = float(np.sqrt((ratio**2).mean()))
-    excluded = 1.0 - keep.mean()
+    # NMAPE
+    v_in = float(case["scalars"][case["scalar_columns"].index("V_in")])
+    ref = v_in if name == "velocity_magnitude" else 0.5 * RHO * v_in**2
+    nmape = 100.0 * float(np.abs(pred - true).mean() / ref)
+    worst = 100.0 * float(np.abs(pred - true).max() / ref)
 
-    rel = np.full_like(diff, np.nan)
-    rel[keep] = 100.0 * ratio
-
-    fig, ax = plt.subplots(2, 1, figsize = (9, 7), sharex = True, sharey = True)
-
+    diff = (pred - true) * scale
     span = np.abs(diff).max()
+
+    fig, ax = plt.subplots(figsize = (9, 4))
     XI, YI, ZD = to_grid(case["x"], case["y"], diff)
-    cf = ax[0].contourf(XI, YI, ZD, levels = np.linspace(-span, span, 41),
-                        cmap = "RdBu_r", extend = "both")
-    ax[0].set_title(f"Predicted - actual   (max |error| = {span:.4g} {unit})")
-    fig.colorbar(cf, ax = ax[0], label = f"difference [{unit}]" if unit else "difference")
-
-    XI, YI, ZR = to_grid(case["x"], case["y"], rel)
-    cf = ax[1].contourf(XI, YI, ZR, levels = np.linspace(0, min(np.nanmax(ZR), 50), 26),
-                        cmap = "magma_r", extend = "max")
-    ax[1].set_title(f"Relative error   L1 = {l1:.4f}   L2 = {l2:.4f}")
-    fig.colorbar(cf, ax = ax[1], label = "relative error [%]")
-    ax[1].text(0.01, -0.22, f"|phi| > {thr:g} ({ZERO_MODE}), "
-               f"{excluded:.2%} of nodes excluded",
-               transform = ax[1].transAxes, fontsize = 8, color = "0.35")
-
-    for a in ax:
-        a.set_ylabel("y")
-        a.set_aspect("equal")
-    ax[1].set_xlabel("x")
+    cf = ax.contourf(XI, YI, ZD, levels = np.linspace(-span, span, 41),
+                     cmap = "RdBu_r", extend = "both")
+    ax.set_title(f"Predicted - actual   NMAPE = {nmape:.3f}%   "
+                 f"worst node = {worst:.2f}%")
+    fig.colorbar(cf, ax = ax, label = f"difference [{unit}]" if unit else "difference")
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_aspect("equal")
+    ax.text(0.01, -0.28, f"max |error| = {span:.4g} {unit},  "
+            f"normalised by {'V_in' if name == 'velocity_magnitude' else '0.5*rho*V_in^2'}"
+            f" = {ref:.4g}",
+            transform = ax.transAxes, fontsize = 8, color = "0.35")
 
     fig.suptitle(f"{label} error -- {case_title(case)}", fontsize = 10)
     fig.tight_layout()
     out = FIG_DIR / f"dp{case['dp_id']}_{name}_error.png"
     fig.savefig(out, dpi = DPI, bbox_inches = "tight")
     plt.close(fig)
-    print(f"[plot] {out.name}  L1={l1:.4f} L2={l2:.4f}")
+    print(f"[plot] {out.name}  NMAPE={nmape:.3f}%")
 
 
 def plot_parity(cases: list[dict]) -> None:
