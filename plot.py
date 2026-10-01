@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import csv
@@ -13,25 +12,27 @@ from scipy.interpolate import griddata
 RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
-
+PARITY_FILE = RUN_DIR / "parity_test.npz"  
 GRID_N = 400 # interpolation grid resolution along x
-SMOOTH_SIGMA = 1.0      # gaussian smoothing of the interpolated grid
-N_CONTOURS = 20
+SMOOTH_SIGMA = 1.0 # gaussian smoothing of the interpolated grid
+N_CONTOURS = 25
 
 RHO = 1025.0 # fluid density, for the NMAPE reference
 
-LEADING_EDGE_X = 0.0    # position of LE in CFD domain 
+LEADING_EDGE_X = 0.0 # position of LE in CFD domain 
 LEADING_EDGE_Y = 1.0
 DRAW_FOIL = True       
 
-MASK_RADIUS = 0.01      # grid points further than this from any cell centre are masked
+MASK_RADIUS = 0.01 # grid points further than this from any cell centre are masked
 
 DPI = 150
 
+# name, unit, scale factor, colour map
 FIELD_LABELS = {
-    "static_pressure": ("Pressure", "kPa", 1e-3),      # name, unit, scale factor
-    "velocity_magnitude": ("Velocity magnitude", "m/s", 1.0),
+    "static_pressure": ("Pressure", "kPa", 1e-3, "autumn_r"),
+    "velocity_magnitude": ("Velocity magnitude", "m/s", 1.0, "viridis"),
 }
+DEFAULT_FIELD = ("", "", 1.0, "viridis")
 
 
 def load_case(path: Path) -> dict:
@@ -81,8 +82,7 @@ def to_grid(x, y, values):
 
 
 def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
-    """Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates.
-    """
+    "Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates."
     # cosine spacing
     beta = np.linspace(0.0, np.pi, n)
     x = 0.5 * (1.0 - np.cos(beta))
@@ -94,12 +94,8 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
         dyc = np.zeros_like(x)
     else:
         fore = x <= p
-        yc = np.where(fore,
-                      m / p**2 * (2 * p * x - x**2),
-                      m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
-        dyc = np.where(fore,
-                       2 * m / p**2 * (p - x),
-                       2 * m / (1 - p)**2 * (p - x))
+        yc = np.where(fore, m / p**2 * (2 * p * x - x**2),m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
+        dyc = np.where(fore, 2 * m / p**2 * (p - x), 2 * m / (1 - p)**2 * (p - x))
 
     theta = np.arctan(dyc)
     xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
@@ -112,8 +108,7 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
 
 
 def foil_outline(case: dict) -> np.ndarray:
-    """The case's foil, rotated about the leading edge by the angle of attack and placed
-    at the leading-edge position used in the CFD domain."""
+    "The case's foil, rotated about the leading edge by the angle of attack and placed at the leading-edge position used in the CFD domain."
     names = case["scalar_columns"]
     s = case["scalars"]
     m = float(s[names.index("m")])
@@ -122,16 +117,14 @@ def foil_outline(case: dict) -> np.ndarray:
     aoa = np.radians(float(s[names.index("AoA")]))
 
     xy = naca4_profile(m, p, t)
-    c, sn = np.cos(-aoa), np.sin(-aoa)          # nose-up rotation about the leading edge
-    rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn,
-                    xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
+    c, sn = np.cos(-aoa), np.sin(-aoa) # nose-up rotation about the leading edge
+    rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn, xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
     return rot + np.array([LEADING_EDGE_X, LEADING_EDGE_Y])
 
 
 def draw_foil(ax, case: dict) -> None:
     xy = foil_outline(case)
-    ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k",
-            linewidth = 0.8, zorder = 5)
+    ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k", linewidth = 0.8, zorder = 5)
 
 
 def case_title(case: dict) -> str:
@@ -140,9 +133,9 @@ def case_title(case: dict) -> str:
 
 
 def plot_contours(case: dict, field_index: int) -> None:
-    "Predicted, actual, and the two overlaid"
+    "Predicted and actual, on a shared colour scale"
     name = case["target_columns"][field_index]
-    label, unit, scale = FIELD_LABELS.get(name, (name, "", 1.0))
+    label, unit, scale, cmap = FIELD_LABELS.get(name, (name,) + DEFAULT_FIELD[1:])
 
     pred = case["pred"][:, field_index] * scale
     true = case["true"][:, field_index] * scale
@@ -155,7 +148,7 @@ def plot_contours(case: dict, field_index: int) -> None:
     fig, ax = plt.subplots(2, 1, figsize = (9, 7), sharex = True, sharey = True)
 
     for a, Z, title in ((ax[0], ZP, "Predicted"), (ax[1], ZT, "Actual (CFD)")):
-        cf = a.contourf(XI, YI, Z, levels = levels, cmap = "viridis", extend = "both")
+        cf = a.contourf(XI, YI, Z, levels = levels, cmap = cmap, extend = "both")
         a.contour(XI, YI, Z, levels = levels, colors = "k", linewidths = 0.25)
         if DRAW_FOIL:
             draw_foil(a, case)
@@ -164,7 +157,6 @@ def plot_contours(case: dict, field_index: int) -> None:
         a.set_aspect("equal")
         fig.colorbar(cf, ax = a, label = f"{label} [{unit}]" if unit else label)
 
-    # overlay
     ax[1].set_xlabel("x")
 
     fig.suptitle(f"{label} -- {case_title(case)}", fontsize = 10)
@@ -178,7 +170,7 @@ def plot_contours(case: dict, field_index: int) -> None:
 def plot_error(case: dict, field_index: int) -> None:
     "Signed difference, with the case NMAPE annotated"
     name = case["target_columns"][field_index]
-    label, unit, scale = FIELD_LABELS.get(name, (name, "", 1.0))
+    label, unit, scale, _ = FIELD_LABELS.get(name, (name,) + DEFAULT_FIELD[1:])
 
     pred = case["pred"][:, field_index]
     true = case["true"][:, field_index]
@@ -217,24 +209,27 @@ def plot_error(case: dict, field_index: int) -> None:
     print(f"[plot] {out.name}  NMAPE={nmape:.3f}%")
 
 
-def plot_parity(cases: list[dict]) -> None:
-    "Predicted against actual for every node of every exported case, shaded by camber"
-    n_fields = len(cases[0]["target_columns"])
-    fig, ax = plt.subplots(1, n_fields, figsize = (6 * n_fields, 5.5))
+def plot_parity() -> None:
+    "Predicted against actual for every case in the split, shaded by camber"
+    if not PARITY_FILE.exists():
+        print(f"[plot] no {PARITY_FILE.name}, skipping parity " "(run evaluate.py with PARITY_ALL = True)")
+        return
+
+    z = np.load(PARITY_FILE, allow_pickle = True)
+    pred, true, camber = z["pred"], z["true"], z["camber"]
+    names = [str(c) for c in z["target_columns"]]
+    n_cases = len(z["dp_ids"])
+    stride = int(z["stride"])
+
+    fig, ax = plt.subplots(1, len(names), figsize = (6 * len(names), 5.5))
     ax = np.atleast_1d(ax)
 
-    camber_index = cases[0]["scalar_columns"].index("m")
-
-    for k in range(n_fields):
-        name = cases[0]["target_columns"][k]
-        label, unit, scale = FIELD_LABELS.get(name, (name, "", 1.0))
-        for case in cases:
-            t = case["true"][:, k] * scale
-            p = case["pred"][:, k] * scale
-            m = np.full(t.shape, case["scalars"][camber_index])
-            sc = ax[k].scatter(t, p, c = m, s = 0.3, alpha = 0.3,
-                               cmap = "viridis", vmin = 0.0, vmax = 0.04,
-                               rasterized = True)
+    for k, name in enumerate(names):
+        label, unit, scale, _ = FIELD_LABELS.get(name, (name,) + DEFAULT_FIELD[1:])
+        sc = ax[k].scatter(true[:, k] * scale, pred[:, k] * scale,
+                           c = camber, s = 0.3, alpha = 0.3,
+                           cmap = "viridis", vmin = 0.0, vmax = 0.04,
+                           rasterized = True)
 
         lo = min(ax[k].get_xlim()[0], ax[k].get_ylim()[0])
         hi = max(ax[k].get_xlim()[1], ax[k].get_ylim()[1])
@@ -249,12 +244,13 @@ def plot_parity(cases: list[dict]) -> None:
         ax[k].legend(loc = "upper left", fontsize = 8)
         fig.colorbar(sc, ax = ax[k], label = "maximum camber, m")
 
-    fig.suptitle(f"Parity -- {len(cases)} cases", fontsize = 10)
+    fig.suptitle(f"Parity -- {n_cases} cases, {pred.shape[0]:,} points per field "
+                 f"(every {stride}th node)", fontsize = 10)
     fig.tight_layout()
     out = FIG_DIR / "parity.png"
     fig.savefig(out, dpi = DPI, bbox_inches = "tight")
     plt.close(fig)
-    print(f"[plot] {out.name}")
+    print(f"[plot] {out.name}  ({n_cases} cases)")
 
 
 def plot_history() -> None:
@@ -317,7 +313,7 @@ def main() -> None:
             plot_contours(case, k)
             plot_error(case, k)
 
-    plot_parity(cases)
+    plot_parity()
     plot_history()
     print(f"[plot] figures in {FIG_DIR}")
 
