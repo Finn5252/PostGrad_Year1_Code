@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import csv
@@ -14,10 +15,14 @@ FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 
 GRID_N = 400 # interpolation grid resolution along x
-SMOOTH_SIGMA = 1.0      # gaussian smoothing of the interpolated grid, in grid cell
+SMOOTH_SIGMA = 1.0      # gaussian smoothing of the interpolated grid
 N_CONTOURS = 20
 
-RHO = 1025.0 # fluid density for the NMAPE reference
+RHO = 1025.0 # fluid density, for the NMAPE reference
+
+LEADING_EDGE_X = 0.0    # position of LE in CFD domain 
+LEADING_EDGE_Y = 1.0
+DRAW_FOIL = True       
 
 MASK_RADIUS = 0.01      # grid points further than this from any cell centre are masked
 
@@ -52,8 +57,7 @@ def to_grid(x, y, values):
 
     ZI = griddata((x, y), values, (XI, YI), method = "linear")
 
-    # Mask grid points with no nearby data: the foil interior, and the corners where the
-    # crop box does not quite reach.
+    # Mask grid points with no nearby data
     from scipy.spatial import cKDTree
     tree = cKDTree(np.stack([x, y], axis = 1))
     dist, _ = tree.query(np.stack([XI.ravel(), YI.ravel()], axis = 1))
@@ -74,6 +78,60 @@ def to_grid(x, y, values):
         ZI = np.ma.masked_where(~valid, out)
 
     return XI, YI, ZI
+
+
+def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
+    """Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates.
+    """
+    # cosine spacing
+    beta = np.linspace(0.0, np.pi, n)
+    x = 0.5 * (1.0 - np.cos(beta))
+
+    yt = 5.0 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 - 0.1015 * x**4)
+
+    if m == 0.0 or p == 0.0:
+        yc = np.zeros_like(x)
+        dyc = np.zeros_like(x)
+    else:
+        fore = x <= p
+        yc = np.where(fore,
+                      m / p**2 * (2 * p * x - x**2),
+                      m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
+        dyc = np.where(fore,
+                       2 * m / p**2 * (p - x),
+                       2 * m / (1 - p)**2 * (p - x))
+
+    theta = np.arctan(dyc)
+    xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
+    xl, yl = x + yt * np.sin(theta), yc - yt * np.cos(theta)
+
+    return np.concatenate([
+        np.stack([xu, yu], axis = 1),
+        np.stack([xl[::-1], yl[::-1]], axis = 1),
+    ])
+
+
+def foil_outline(case: dict) -> np.ndarray:
+    """The case's foil, rotated about the leading edge by the angle of attack and placed
+    at the leading-edge position used in the CFD domain."""
+    names = case["scalar_columns"]
+    s = case["scalars"]
+    m = float(s[names.index("m")])
+    p = float(s[names.index("p")])
+    t = float(s[names.index("t")])
+    aoa = np.radians(float(s[names.index("AoA")]))
+
+    xy = naca4_profile(m, p, t)
+    c, sn = np.cos(-aoa), np.sin(-aoa)          # nose-up rotation about the leading edge
+    rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn,
+                    xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
+    return rot + np.array([LEADING_EDGE_X, LEADING_EDGE_Y])
+
+
+def draw_foil(ax, case: dict) -> None:
+    xy = foil_outline(case)
+    ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k",
+            linewidth = 0.8, zorder = 5)
 
 
 def case_title(case: dict) -> str:
@@ -99,12 +157,14 @@ def plot_contours(case: dict, field_index: int) -> None:
     for a, Z, title in ((ax[0], ZP, "Predicted"), (ax[1], ZT, "Actual (CFD)")):
         cf = a.contourf(XI, YI, Z, levels = levels, cmap = "viridis", extend = "both")
         a.contour(XI, YI, Z, levels = levels, colors = "k", linewidths = 0.25)
+        if DRAW_FOIL:
+            draw_foil(a, case)
         a.set_title(title)
         a.set_ylabel("y")
         a.set_aspect("equal")
         fig.colorbar(cf, ax = a, label = f"{label} [{unit}]" if unit else label)
 
-    # overlay the two sets of contour lines on the same axes
+    # overlay
     ax[1].set_xlabel("x")
 
     fig.suptitle(f"{label} -- {case_title(case)}", fontsize = 10)
@@ -138,6 +198,8 @@ def plot_error(case: dict, field_index: int) -> None:
                      cmap = "RdBu_r", extend = "both")
     ax.set_title(f"Predicted - actual   NMAPE = {nmape:.3f}%   "
                  f"worst node = {worst:.2f}%")
+    if DRAW_FOIL:
+        draw_foil(ax, case)
     fig.colorbar(cf, ax = ax, label = f"difference [{unit}]" if unit else "difference")
     ax.set_xlabel("x")
     ax.set_ylabel("y")
@@ -176,11 +238,11 @@ def plot_parity(cases: list[dict]) -> None:
 
         lo = min(ax[k].get_xlim()[0], ax[k].get_ylim()[0])
         hi = max(ax[k].get_xlim()[1], ax[k].get_ylim()[1])
-        ax[k].plot([lo, hi], [lo, hi], "r--", linewidth = 1, label = "1:1")
-        band = 0.1 * max(abs(lo), abs(hi))
-        ax[k].plot([lo, hi], [lo + band, hi + band], "k--", linewidth = 0.7,
-                   label = "+/-10% of range")
-        ax[k].plot([lo, hi], [lo - band, hi - band], "k--", linewidth = 0.7)
+        line = np.array([lo, hi])
+        ax[k].plot(line, line, "r--", linewidth = 1, label = "1:1 line")
+        # relative bands
+        ax[k].plot(line, line * 1.1, "k--", linewidth = 0.7, label = "+10% error")
+        ax[k].plot(line, line * 0.9, "k--", linewidth = 0.7, label = "-10% error")
         ax[k].set_xlabel(f"Actual {label} [{unit}]" if unit else f"Actual {label}")
         ax[k].set_ylabel(f"Predicted {label} [{unit}]" if unit else f"Predicted {label}")
         ax[k].set_aspect("equal", adjustable = "box")
