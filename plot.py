@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -12,7 +13,9 @@ from scipy.interpolate import griddata
 RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
-PARITY_FILE = RUN_DIR / "parity_test.npz"  
+PARITY_FILE = RUN_DIR / "parity_test.npz" 
+LIFT_FILE = RUN_DIR / "lift_test.json"      # forces.py
+
 GRID_N = 400 # interpolation grid resolution along x
 SMOOTH_SIGMA = 1.0 # gaussian smoothing of the interpolated grid
 N_CONTOURS = 25
@@ -29,7 +32,7 @@ DPI = 150
 
 # name, unit, scale factor, colour map
 FIELD_LABELS = {
-    "static_pressure": ("Pressure", "kPa", 1e-3, "autumn"),
+    "static_pressure": ("Pressure", "kPa", 1e-3, "autumn_r"),
     "velocity_magnitude": ("Velocity magnitude", "m/s", 1.0, "viridis"),
 }
 DEFAULT_FIELD = ("", "", 1.0, "viridis")
@@ -82,7 +85,8 @@ def to_grid(x, y, values):
 
 
 def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
-    "Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates."
+    """Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates.
+    """
     # cosine spacing
     beta = np.linspace(0.0, np.pi, n)
     x = 0.5 * (1.0 - np.cos(beta))
@@ -94,8 +98,12 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
         dyc = np.zeros_like(x)
     else:
         fore = x <= p
-        yc = np.where(fore, m / p**2 * (2 * p * x - x**2),m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
-        dyc = np.where(fore, 2 * m / p**2 * (p - x), 2 * m / (1 - p)**2 * (p - x))
+        yc = np.where(fore,
+                      m / p**2 * (2 * p * x - x**2),
+                      m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
+        dyc = np.where(fore,
+                       2 * m / p**2 * (p - x),
+                       2 * m / (1 - p)**2 * (p - x))
 
     theta = np.arctan(dyc)
     xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
@@ -108,7 +116,8 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
 
 
 def foil_outline(case: dict) -> np.ndarray:
-    "The case's foil, rotated about the leading edge by the angle of attack and placed at the leading-edge position used in the CFD domain."
+    """The case's foil, rotated about the leading edge by the angle of attack and placed
+    at the leading-edge position used in the CFD domain."""
     names = case["scalar_columns"]
     s = case["scalars"]
     m = float(s[names.index("m")])
@@ -117,14 +126,16 @@ def foil_outline(case: dict) -> np.ndarray:
     aoa = np.radians(float(s[names.index("AoA")]))
 
     xy = naca4_profile(m, p, t)
-    c, sn = np.cos(-aoa), np.sin(-aoa) # nose-up rotation about the leading edge
-    rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn, xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
+    c, sn = np.cos(-aoa), np.sin(-aoa)          # nose-up rotation about the leading edge
+    rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn,
+                    xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
     return rot + np.array([LEADING_EDGE_X, LEADING_EDGE_Y])
 
 
 def draw_foil(ax, case: dict) -> None:
     xy = foil_outline(case)
-    ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k", linewidth = 0.8, zorder = 5)
+    ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k",
+            linewidth = 0.8, zorder = 5)
 
 
 def case_title(case: dict) -> str:
@@ -212,7 +223,8 @@ def plot_error(case: dict, field_index: int) -> None:
 def plot_parity() -> None:
     "Predicted against actual for every case in the split, shaded by camber"
     if not PARITY_FILE.exists():
-        print(f"[plot] no {PARITY_FILE.name}, skipping parity " "(run evaluate.py with PARITY_ALL = True)")
+        print(f"[plot] no {PARITY_FILE.name}, skipping parity "
+              "(run evaluate.py with PARITY_ALL = True)")
         return
 
     z = np.load(PARITY_FILE, allow_pickle = True)
@@ -235,7 +247,7 @@ def plot_parity() -> None:
         hi = max(ax[k].get_xlim()[1], ax[k].get_ylim()[1])
         line = np.array([lo, hi])
         ax[k].plot(line, line, "r--", linewidth = 1, label = "1:1 line")
-        # relative bands
+        # true relative bands, as in the source paper: these fan out from the origin
         ax[k].plot(line, line * 1.1, "k--", linewidth = 0.7, label = "+10% error")
         ax[k].plot(line, line * 0.9, "k--", linewidth = 0.7, label = "-10% error")
         ax[k].set_xlabel(f"Actual {label} [{unit}]" if unit else f"Actual {label}")
@@ -251,6 +263,53 @@ def plot_parity() -> None:
     fig.savefig(out, dpi = DPI, bbox_inches = "tight")
     plt.close(fig)
     print(f"[plot] {out.name}  ({n_cases} cases)")
+
+
+def plot_lift_parity() -> None:
+    "Integrated lift coefficient, predicted against CFD, one point per case"
+    if not LIFT_FILE.exists():
+        print(f"[plot] no {LIFT_FILE.name}, skipping lift parity (run forces.py)")
+        return
+
+    rows = json.loads(LIFT_FILE.read_text())
+    true = np.array([r["Cl_cfd"] for r in rows])
+    pred = np.array([r["Cl_pred"] for r in rows])
+    v_in = np.array([r["V_in"] for r in rows])
+
+    err = pred - true
+    mean_abs = float(np.abs(err).mean())
+    rel = float(100.0 * (np.abs(err) / np.maximum(np.abs(true), 1e-12)).mean())
+    bias = float(err.mean())
+
+    fig, ax = plt.subplots(figsize = (6.5, 6))
+    sc = ax.scatter(true, pred, c = v_in, s = 22, cmap = "plasma",
+                    edgecolor = "k", linewidth = 0.3, zorder = 3)
+
+    lo = min(true.min(), pred.min())
+    hi = max(true.max(), pred.max())
+    pad = 0.05 * (hi - lo)
+    line = np.array([lo - pad, hi + pad])
+    ax.plot(line, line, "r--", linewidth = 1, label = "1:1 line", zorder = 2)
+    ax.plot(line, line * 1.05, "k--", linewidth = 0.7, label = "+5% error", zorder = 2)
+    ax.plot(line, line * 0.95, "k--", linewidth = 0.7, label = "-5% error", zorder = 2)
+
+    ax.set_xlim(line)
+    ax.set_ylim(line)
+    ax.set_xlabel("CFD lift coefficient, $C_L$")
+    ax.set_ylabel("Predicted lift coefficient, $C_L$")
+    ax.set_aspect("equal", adjustable = "box")
+    ax.grid(True, alpha = 0.2)
+    ax.legend(loc = "upper left", fontsize = 8)
+    fig.colorbar(sc, ax = ax, label = "inlet velocity [m/s]")
+
+    ax.set_title(f"Integrated lift -- {len(rows)} cases\n"
+                 f"mean |error| = {mean_abs:.4f} ({rel:.2f}%),  bias = {bias:+.4f}",
+                 fontsize = 10)
+    fig.tight_layout()
+    out = FIG_DIR / "lift_parity.png"
+    fig.savefig(out, dpi = DPI, bbox_inches = "tight")
+    plt.close(fig)
+    print(f"[plot] {out.name}  mean |error| = {rel:.2f}% of the CFD value")
 
 
 def plot_history() -> None:
@@ -314,6 +373,7 @@ def main() -> None:
             plot_error(case, k)
 
     plot_parity()
+    plot_lift_parity()
     plot_history()
     print(f"[plot] figures in {FIG_DIR}")
 
