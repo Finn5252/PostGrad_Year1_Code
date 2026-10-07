@@ -1,3 +1,4 @@
+#libraries
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -26,7 +27,7 @@ class MeanAccumulator:
 
 @dataclass
 class RelativeErrorConfig:
-    "Handling nodes whose ground truth value approx. 0"
+    "Handling nodes whose ground truth value are close to 0"
 
     mode: Literal["mask", "floor"] = "mask"
     threshold_mode: Literal["relative_rms", "absolute"] = "relative_rms"
@@ -174,7 +175,7 @@ class NMAPEAccumulator:
 def reference_values(
     v_in: float, field_names: Sequence[str], rho: float = 1025.0
 ) -> np.ndarray:
-    "Per-case NMAPE denominators. Velocity is normalised by the inlet velocity, pressure by the dynamic pressure, since the outlet static pressure is zero."
+    "Velocity is normalised by the inlet velocity, pressure by the dynamic pressure, since the outlet static pressure is zero."
     dynamic = 0.5 * rho * v_in**2
     lookup = {
         "velocity_magnitude": v_in,
