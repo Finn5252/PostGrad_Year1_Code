@@ -13,18 +13,18 @@ from scipy.interpolate import griddata
 RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
-PARITY_FILE = RUN_DIR / "parity_test.npz" 
-LIFT_FILE = RUN_DIR / "lift_test.json"      # forces.py
+PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
+LIFT_FILE = RUN_DIR / "lift_test.json"  # forces.py
 
 GRID_N = 400 # interpolation grid resolution along x
 SMOOTH_SIGMA = 1.0 # gaussian smoothing of the interpolated grid
 N_CONTOURS = 25
 
-RHO = 1025.0 # fluid density, for the NMAPE reference
+RHO = 1025.0 # fluid density
 
 LEADING_EDGE_X = 0.0 # position of LE in CFD domain 
 LEADING_EDGE_Y = 1.0
-DRAW_FOIL = True       
+DRAW_FOIL = True    # draw the analytic outline
 
 MASK_RADIUS = 0.01 # grid points further than this from any cell centre are masked
 
@@ -39,6 +39,7 @@ DEFAULT_FIELD = ("", "", 1.0, "viridis")
 
 
 def load_case(path: Path) -> dict:
+    # allow_pickle because the column names are stored as an object array of strings
     z = np.load(path, allow_pickle = True)
     return {
         "x": z["x"],
@@ -55,6 +56,7 @@ def load_case(path: Path) -> dict:
 def to_grid(x, y, values):
     "Interpolate scattered cell-centre values onto a regular grid, masking empty regions"
     xi = np.linspace(x.min(), x.max(), GRID_N)
+    # aspect keeps the grid cells square, so the contours are not distorted
     aspect = (y.max() - y.min()) / (x.max() - x.min())
     yi = np.linspace(y.min(), y.max(), max(int(GRID_N * aspect), 50))
     XI, YI = np.meshgrid(xi, yi)
@@ -70,6 +72,7 @@ def to_grid(x, y, values):
     )
 
     if SMOOTH_SIGMA > 0:
+        # Normalised convolution
         from scipy.ndimage import gaussian_filter
         filled = ZI.filled(np.nan)
         valid = ~np.isnan(filled)
@@ -85,16 +88,14 @@ def to_grid(x, y, values):
 
 
 def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
-    """Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates.
-    """
-    # cosine spacing
+    "Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates."
     beta = np.linspace(0.0, np.pi, n)
     x = 0.5 * (1.0 - np.cos(beta))
 
     yt = 5.0 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 - 0.1015 * x**4)
 
     if m == 0.0 or p == 0.0:
-        yc = np.zeros_like(x)
+        yc = np.zeros_like(x) # symmetric section: no camber line
         dyc = np.zeros_like(x)
     else:
         fore = x <= p
@@ -105,10 +106,12 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
                        2 * m / p**2 * (p - x),
                        2 * m / (1 - p)**2 * (p - x))
 
+    # thickness added normal to the camber line, not vertically
     theta = np.arctan(dyc)
     xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
     xl, yl = x + yt * np.sin(theta), yc - yt * np.cos(theta)
 
+    # lower surface reversed, so the two join into one closed loop
     return np.concatenate([
         np.stack([xu, yu], axis = 1),
         np.stack([xl[::-1], yl[::-1]], axis = 1),
@@ -116,8 +119,7 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
 
 
 def foil_outline(case: dict) -> np.ndarray:
-    """The case's foil, rotated about the leading edge by the angle of attack and placed
-    at the leading-edge position used in the CFD domain."""
+    "The case's foil, rotated about the leading edge by the angle of attack and placed at the leading-edge position used in the CFD domain."
     names = case["scalar_columns"]
     s = case["scalars"]
     m = float(s[names.index("m")])
@@ -126,7 +128,7 @@ def foil_outline(case: dict) -> np.ndarray:
     aoa = np.radians(float(s[names.index("AoA")]))
 
     xy = naca4_profile(m, p, t)
-    c, sn = np.cos(-aoa), np.sin(-aoa)          # nose-up rotation about the leading edge
+    c, sn = np.cos(-aoa), np.sin(-aoa)        
     rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn,
                     xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
     return rot + np.array([LEADING_EDGE_X, LEADING_EDGE_Y])
@@ -134,6 +136,7 @@ def foil_outline(case: dict) -> np.ndarray:
 
 def draw_foil(ax, case: dict) -> None:
     xy = foil_outline(case)
+    # zorder 5 puts it over the contours
     ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k",
             linewidth = 0.8, zorder = 5)
 
@@ -150,6 +153,7 @@ def plot_contours(case: dict, field_index: int) -> None:
 
     pred = case["pred"][:, field_index] * scale
     true = case["true"][:, field_index] * scale
+    # Shared levels across both panels. With independent scales the two would look alike
     lo, hi = min(pred.min(), true.min()), max(pred.max(), true.max())
     levels = np.linspace(lo, hi, N_CONTOURS)
 
@@ -183,6 +187,7 @@ def plot_error(case: dict, field_index: int) -> None:
     name = case["target_columns"][field_index]
     label, unit, scale, _ = FIELD_LABELS.get(name, (name,) + DEFAULT_FIELD[1:])
 
+    # computed on raw Pa and m/s
     pred = case["pred"][:, field_index]
     true = case["true"][:, field_index]
 
@@ -197,6 +202,8 @@ def plot_error(case: dict, field_index: int) -> None:
 
     fig, ax = plt.subplots(figsize = (9, 4))
     XI, YI, ZD = to_grid(case["x"], case["y"], diff)
+    # diverging map on symmetric limits
+    # red is over-prediction, blue under
     cf = ax.contourf(XI, YI, ZD, levels = np.linspace(-span, span, 41),
                      cmap = "RdBu_r", extend = "both")
     ax.set_title(f"Predicted - actual   NMAPE = {nmape:.3f}%   "
@@ -221,7 +228,7 @@ def plot_error(case: dict, field_index: int) -> None:
 
 
 def plot_parity() -> None:
-    "Predicted against actual for every case in the split, shaded by camber"
+    "Predicted against actual for every case in the split, shaded by camber."
     if not PARITY_FILE.exists():
         print(f"[plot] no {PARITY_FILE.name}, skipping parity "
               "(run evaluate.py with PARITY_ALL = True)")
@@ -238,6 +245,7 @@ def plot_parity() -> None:
 
     for k, name in enumerate(names):
         label, unit, scale, _ = FIELD_LABELS.get(name, (name,) + DEFAULT_FIELD[1:])
+        # small and semi-transparent, so density shows through the overplotting;
         sc = ax[k].scatter(true[:, k] * scale, pred[:, k] * scale,
                            c = camber, s = 0.3, alpha = 0.3,
                            cmap = "viridis", vmin = 0.0, vmax = 0.04,
@@ -247,7 +255,7 @@ def plot_parity() -> None:
         hi = max(ax[k].get_xlim()[1], ax[k].get_ylim()[1])
         line = np.array([lo, hi])
         ax[k].plot(line, line, "r--", linewidth = 1, label = "1:1 line")
-        # true relative bands, as in the source paper: these fan out from the origin
+        # true relative bands
         ax[k].plot(line, line * 1.1, "k--", linewidth = 0.7, label = "+10% error")
         ax[k].plot(line, line * 0.9, "k--", linewidth = 0.7, label = "-10% error")
         ax[k].set_xlabel(f"Actual {label} [{unit}]" if unit else f"Actual {label}")
@@ -282,6 +290,7 @@ def plot_lift_parity() -> None:
     bias = float(err.mean())
 
     fig, ax = plt.subplots(figsize = (6.5, 6))
+    # coloured by inlet velocity
     sc = ax.scatter(true, pred, c = v_in, s = 22, cmap = "plasma",
                     edgecolor = "k", linewidth = 0.3, zorder = 3)
 
@@ -290,6 +299,7 @@ def plot_lift_parity() -> None:
     pad = 0.05 * (hi - lo)
     line = np.array([lo - pad, hi + pad])
     ax.plot(line, line, "r--", linewidth = 1, label = "1:1 line", zorder = 2)
+    # 5% 
     ax.plot(line, line * 1.05, "k--", linewidth = 0.7, label = "+5% error", zorder = 2)
     ax.plot(line, line * 0.95, "k--", linewidth = 0.7, label = "-5% error", zorder = 2)
 
@@ -329,8 +339,10 @@ def plot_history() -> None:
             lr.append(float(row["lr"]))
 
     fig, ax = plt.subplots(figsize = (8, 5))
+    # log scale
     ax.semilogy(epochs, train, linewidth = 0.8, label = "training")
     ax.semilogy(epochs, val, linewidth = 0.8, label = "validation")
+    # all-NaN when LOG_TEST_EACH_EPOCH is False
     if not np.all(np.isnan(test)):
         ax.semilogy(epochs, test, linewidth = 0.8, label = "test")
 
@@ -340,7 +352,7 @@ def plot_history() -> None:
                 xy = (epochs[best], val[best]), xytext = (10, 20),
                 textcoords = "offset points", fontsize = 8)
 
-    # mark the learning-rate decay steps
+    # mark the learning-rate decay steps 
     for i in range(1, len(lr)):
         if lr[i] < lr[i - 1]:
             ax.axvline(epochs[i], color = "grey", linestyle = "--", linewidth = 0.5)
@@ -367,11 +379,13 @@ def main() -> None:
     cases = [load_case(p) for p in paths]
     print(f"[plot] {len(cases)} case(s) from {FIELD_DIR}")
 
+    # two figures per field per case: the fields themselves, and where they differ
     for case in cases:
         for k in range(len(case["target_columns"])):
             plot_contours(case, k)
             plot_error(case, k)
 
+    # entire test split
     plot_parity()
     plot_lift_parity()
     plot_history()
