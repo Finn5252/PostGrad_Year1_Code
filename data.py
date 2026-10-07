@@ -1,3 +1,5 @@
+# libraries
+
 from __future__ import annotations
 
 import hashlib
@@ -13,18 +15,20 @@ import torch
 from scipy.spatial import cKDTree
 from torch_geometric.data import Data
 
-MIN_NODES_AFTER_CROP = 16
+MIN_NODES_AFTER_CROP = 16   # a case with fewer than this inside the box is an error
 
 # configuration
 
 @dataclass(frozen = True)
 class CropBox:
+    # frozen: the bounds go into the cache key, so a box that changed after the graphs were built would give a silent mismatch
     x_min: float
     x_max: float
     y_min: float
     y_max: float
 
     def mask(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        # x and y are whole arrays; & is elementwise, so this returns one bool per cell
         return (x >= self.x_min) & (x <= self.x_max) & (y >= self.y_min) & (y <= self.y_max)
 
 @dataclass
@@ -50,6 +54,7 @@ class DataConfig:
             raise ValueError(f"split fractions must be sum to 1, got {self.split_fractions}")
         if self.knn_k < 1:
             raise ValueError("knn_k must be >=1")
+        # cropping reads x and y out of the node matrix, so they have to be in it
         for name in (self.x_column, self.y_column):
             if name not in self.node_columns:
                 raise ValueError(
@@ -59,6 +64,7 @@ class DataConfig:
 
     def cache_key(self, store_fingerprint: str) -> str:
         "Identifies a cached KNN build. Changing the crop or k changes the key"
+        # Everything that affects the graphs goes into the hash
         payload = {
             "store": store_fingerprint,
             "node_columns": list(self.node_columns),
@@ -67,6 +73,7 @@ class DataConfig:
             "crop": asdict(self.crop) if self.crop is not None else None,
             "knn_k": self.knn_k,
         }
+        # sort_keys, or the same settings could hash differently between runs
         blob = json.dumps(payload, sort_keys = True).encode()
         return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -78,6 +85,7 @@ class MinMaxScaler:
     data_max: Optional[np.ndarray] = None
 
     def partial_fit(self, batch: np.ndarray) -> "MinMaxScaler":
+        # "partial": fed one case at a time, so the rows never have to be held in memory to find a min and a max
         batch = np.asarray(batch, dtype = np.float64)
         if batch.ndim != 2:
             raise ValueError (f"expected 2D array, got shape {batch.shape}")
@@ -127,6 +135,7 @@ class ScalerBundle:
     scalar_columns: list[str] = field(default_factory = list)
 
     def save(self, path: str | Path) -> None:
+        # Saved alongside every checkpoint
         path = Path(path)
         path.parent.mkdir(parents = True, exist_ok = True)
         path.write_text(
@@ -175,6 +184,8 @@ def _select_by_name(available: Sequence[str], requested: Sequence[str], what: st
     return [lookup[n] for n in requested]
 
 class CaseStore:
+    "Read-only view over the concatenated HDF5 arrays, addressed per case"
+
     def __init__(self, cfg: DataConfig) -> None:
         self.cfg = cfg
         self.path = Path(cfg.h5_path)
@@ -191,6 +202,7 @@ class CaseStore:
             self.available_node_columns = _decode_names(f["node_columns"])
             self.available_target_columns = _decode_names(f["target_columns"])
             self.available_scalar_columns = _decode_names(f["scalar_columns"])
+            # read a case at a time.
             self.node_offsets = np.asarray(f["node_offsets"][:], dtype=np.int64)
             self.dp_ids = np.asarray(f["dp_ids"][:], dtype=np.int64)
             self.scalars_raw = np.asarray(f["scalars"][:], dtype=np.float64)
@@ -227,6 +239,7 @@ class CaseStore:
 
     @property
     def file(self) -> h5py.File:
+        # Opened on first use 
         if self._file is None:
             self._file = h5py.File(self.path, "r")
         return self._file
@@ -238,11 +251,13 @@ class CaseStore:
 
     @property
     def fingerprint(self) -> str:
+        # Goes into the cache key
         stat = self.path.stat()
         return f"{self.path.name}: {stat.st_size}: {int(stat.st_mtime)}: {self.n_cases}"
 
     def raw_case(self, i: int) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
         "Return (node_features, targets, scalars, dp_id) for case ``i``, uncropped."
+        # the offsets in use: case i occupies rows a to b of the concatenated arrays
         a, b = int(self.node_offsets[i]), int(self.node_offsets[i + 1])
         f = self.file
         nodes = np.asarray(f["node_data"][a:b, :], dtype=np.float64)[:, self.node_idx]
@@ -261,6 +276,7 @@ class CaseStore:
                     f"case {i} (dp_id={dp_id}) has only {n_kept} nodes inside the crop "
                     f"box {crop}; minimum is {MIN_NODES_AFTER_CROP}"
                 )
+            # the same boolean applied to both, so nodes and targets stay aligned
             nodes, targets = nodes[keep], targets[keep]
         return nodes, targets, scalars, dp_id
 
@@ -268,18 +284,19 @@ class CaseStore:
 
 def knn_edge_index(xy: np.ndarray, k: int) -> np.ndarray:
     "Symmetric KNN connectivity on 2D points, returned as a (2, E) COO array"
-
     n = xy.shape[0]
-    k_eff = min(k, n - 1)
+    k_eff = min(k, n - 1) # guards a case with fewer cells than k
     if k_eff < 1:
         return np.zeros((2,0), dtype = np.int64)
 
+    # k-d tree
     tree = cKDTree(xy)
-    _, idx = tree.query(xy, k = k_eff + 1)
+    _, idx = tree.query(xy, k = k_eff + 1)  # k+1 since a point is its own nearest match
     idx = np.atleast_2d(idx)
     src = np.repeat(np.arange(n, dtype = np.int64), k_eff)
-    dst = idx[:, 1:].reshape(-1).astype(np.int64)
+    dst = idx[:, 1:].reshape(-1).astype(np.int64)   # [:, 1:] drops the self-match
 
+    # Nearest-neighbour relations are not mutual, so both directions are added and the duplicates this creates are then removed.
     src, dst = np.concatenate([src, dst]), np.concatenate([dst, src])
     keep = src != dst
     pairs = np.unique(np.stack([src[keep], dst[keep]], axis = 1), axis = 0)
@@ -296,6 +313,7 @@ class GraphCache:
 
     def build_or_load(self, verbose: bool = True) -> None:
         if self.path.exists():
+            # same offsets pattern as the HDF5, applied to edges rather than nodes
             with np.load(self.path) as z:
                 flat, offsets = z["edges"], z["edge_offsets"]
             self._edges = [
@@ -309,6 +327,7 @@ class GraphCache:
             print(f"[data] building KNN graphs (k={self.cfg.knn_k}) -> {self.path}")
         edges = []
         for i in range(self.store.n_cases):
+            # cropped_case
             nodes, _, _, _ = self.store.cropped_case(i)
             xy = nodes[:, [self.store.x_pos, self.store.y_pos]]
             edges.append(knn_edge_index(xy, self.cfg.knn_k))
@@ -327,6 +346,8 @@ class GraphCache:
 # Dataset
 
 class GraphDataset(torch.utils.data.Dataset):
+    "Yields PyG Data objects with scaled features, targets and scalars"
+
     def __init__(
             self,
             store: CaseStore,
@@ -343,6 +364,7 @@ class GraphDataset(torch.utils.data.Dataset):
         return len(self.indices)
 
     def __getitem__(self, j:int) -> Data:
+        # j is the position within this split, i the case number in the file
         i = self.indices[j]
         nodes, targets, scalars, dp_id = self.store.cropped_case(i)
         edge_index = self.cache[i]
@@ -357,6 +379,7 @@ class GraphDataset(torch.utils.data.Dataset):
             y = torch.from_numpy(self.scalers.target.transform(targets)),
             num_nodes = nodes.shape[0]
         )
+        # [None, :] makes it (1, 5) rather than (5,) 
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
         data.case_index = torch.tensor([i], dtype=torch.long)
@@ -364,10 +387,12 @@ class GraphDataset(torch.utils.data.Dataset):
 
 def _split_indices(
     n: int, fractions: tuple[float, float, float], seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    # Shuffled before slicing, because the DOE is ordered
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
     n_train = min(int(round(fractions[0] * n)), n)
     n_val = min(int(round(fractions[1] * n)), n - n_train)
+    # test takes the remainder, so nothing is lost to rounding
     return perm[:n_train], perm[n_train: n_train + n_val], perm[n_train + n_val:]
 
 def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig) -> ScalerBundle:
@@ -376,6 +401,7 @@ def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig)
     node, target, scalar = MinMaxScaler(), MinMaxScaler(), MinMaxScaler()
 
     scalar_rows = []
+    # train_indices only
     for i in train_indices:
         nodes, targets, scalars, _ = store.cropped_case(int(i))
         node.partial_fit(nodes)
