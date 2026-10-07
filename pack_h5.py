@@ -1,4 +1,4 @@
-# packages
+# libraries
 
 from __future__ import annotations
 
@@ -21,15 +21,16 @@ OUT_PATH = Path(r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofo
 
 LIMIT: Optional[int] = None # pilot processing
 
-DP_ID_FROM_FILENAME = r"(\d+)"
+DP_ID_FROM_FILENAME = r"(\d+)" # last run of digits in the filename stem.
 
 PARAM_SEP = ","
 PARAM_DECIMAL = "."
 
 MIN_ROWS_PER_CASE = 1000
-EXCLUDE_DP_IDS = {0}    # DP 0 is the Workbench base design point, not part of the DOE
+EXCLUDE_DP_IDS = {0} # DP 0 is the Workbench base design point, not part of the DOE
 PROGRESS_EVERY = 25
 
+# The export writes the coordinates twice, reversed, at positions 6 and 7. USE_COLS keeps the first occurrence of each
 CSV_HEADER = ["cellnumber", "x-coordinate", "y-coordinate", "velocity-magnitude", "pressure", "cell-volume", "y-coordinate", "x-coordinate",]
 USE_COLS = [0, 1, 2, 3, 4, 5]
 
@@ -56,6 +57,8 @@ def read_case(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         path,
         header = 0,
         usecols = USE_COLS,
+        # Positional names, so the duplicated column names in the file cannot create an
+        # ambiguity about which one was read.
         names = [f"c{i}" for i in range(len(CSV_HEADER))],
         dtype = np.float64,
         skipinitialspace = True,
@@ -63,17 +66,19 @@ def read_case(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     if frame.empty:
         fail(f"{path.name} has a header but no data rows")
  
-    node = np.stack([frame["c1"], frame["c2"], frame["c5"]], axis = 1)      # x, y, volume
-    targets = np.stack([frame["c4"], frame["c3"]], axis = 1)               # pressure, velocity
+    node = np.stack([frame["c1"], frame["c2"], frame["c5"]], axis = 1) # x, y, volume
+    targets = np.stack([frame["c4"], frame["c3"]], axis = 1) # pressure, velocity
     cell_ids = frame["c0"].to_numpy()
  
     for name, arr in (("node_data", node), ("targets", targets)):
         if not np.all(np.isfinite(arr)):
             rows = np.unique(np.nonzero(~np.isfinite(arr))[0])[:5]
             fail(f"{path.name}: non-finite values in {name}, first rows {rows.tolist()}")
+    # Cell numbers are integers. Fractional values mean a wrong column, or fields merged by the wrong separator
     if np.any(cell_ids != np.floor(cell_ids)):
         fail(f"{path.name}: cell numbers are not integral -- wrong column or separator?")
  
+    # read at float64 for the parse, stored at float32 to halve the file size
     return node.astype(np.float32), targets.astype(np.float32), cell_ids.astype(np.int64)
  
  
@@ -87,7 +92,7 @@ def load_param_table() -> dict[int, np.ndarray]:
         sep = PARAM_SEP,
         decimal = PARAM_DECIMAL,
         header = 0,
-        comment = "#",
+        comment = "#",  # Workbench writes six preamble lines, all starting with #
         encoding = "utf-8-sig",
         skipinitialspace = True,
     )
@@ -96,6 +101,7 @@ def load_param_table() -> dict[int, np.ndarray]:
  
     resolved = {}
     for token, name in PARAM_MAP.items():
+        # (?![0-9]) stops P1 from also matching P10 through P19
         hits = [c for c in columns if re.match(rf"^{token}(?![0-9])", c)]
         if len(hits) != 1:
             fail(f"parameter {token} ({name}) matched {hits} in {PARAM_TABLE.name}")
@@ -104,7 +110,7 @@ def load_param_table() -> dict[int, np.ndarray]:
  
     ids = []
     for raw in frame[columns[0]].astype(str).str.strip():
-        found = re.findall(r"\d+", raw)
+        found = re.findall(r"\d+", raw) 
         if not found:
             fail(f"cannot read a design point number from {raw!r}")
         ids.append(int(found[-1]))
@@ -112,6 +118,7 @@ def load_param_table() -> dict[int, np.ndarray]:
         fail("duplicate design point IDs in the parameter table")
  
     values = np.stack(
+        # errors="coerce" turns anything unparseable into NaN, which the next check catches with a message naming the most likely cause
         [pd.to_numeric(frame[resolved[n]], errors = "coerce").to_numpy() for n in SCALAR_COLUMNS],
         axis = 1,
     )
@@ -122,6 +129,7 @@ def load_param_table() -> dict[int, np.ndarray]:
             f"Check PARAM_SEP={PARAM_SEP!r} and PARAM_DECIMAL={PARAM_DECIMAL!r}."
         )
  
+    # Keyed by design point ID, never by row position 
     table = {i: values[k].astype(np.float32) for k, i in enumerate(ids)}
     for i in EXCLUDE_DP_IDS:
         table.pop(i, None)
@@ -150,7 +158,7 @@ def discover_cases() -> dict[int, Path]:
 # writing
  
 def verify_written_file(path: Path, param_table: dict[int, np.ndarray]) -> None:
-    "Re-read the finished file and re-check the join from its own contents"
+    "Re-read the finished file and re-check the join from its own contents."
     with h5py.File(path, "r") as f:
         offsets = f["node_offsets"][:]
         dp_ids = f["dp_ids"][:]
@@ -166,6 +174,7 @@ def verify_written_file(path: Path, param_table: dict[int, np.ndarray]) -> None:
         if f["targets"].shape[0] != total or f["cell_ids"].shape[0] != total:
             fail("targets / cell_ids length disagrees with node_data")
  
+        # The join, re-derived from the file: read the ID stored at position i, look it up in the table, and confirm the scalars written at position i match.
         for i, dp_id in enumerate(dp_ids.tolist()):
             if not np.array_equal(scalars[i], param_table[dp_id]):
                 fail(
@@ -214,6 +223,7 @@ def main() -> None:
  
     OUT_PATH.parent.mkdir(parents = True, exist_ok = True)
     with h5py.File(OUT_PATH, "w") as f:
+        # maxshape=(None, ...) makes the datasets mutable
         node_ds = f.create_dataset("node_data", shape = (0, 3), maxshape = (None, 3),
                                    dtype = np.float32, chunks = True)
         target_ds = f.create_dataset("targets", shape = (0, 2), maxshape = (None, 2),
@@ -223,6 +233,7 @@ def main() -> None:
  
         for k, dp_id in enumerate(selected):
             path = case_paths[dp_id]
+            # Every file checked
             if read_header(path) != CSV_HEADER:
                 fail(f"{path.name} has a different header from the first file")
  
@@ -238,6 +249,7 @@ def main() -> None:
  
             offsets.append(start + n)
             dp_ids.append(dp_id)
+            # Looked up by ID at the moment the node rows are written, so the two cannot drift apart
             scalars.append(param_table[dp_id])
             node_min = np.minimum(node_min, node.min(axis = 0))
             node_max = np.maximum(node_max, node.max(axis = 0))
@@ -257,11 +269,12 @@ def main() -> None:
         f.create_dataset("node_offsets", data = np.asarray(offsets, dtype = np.int64))
         f.create_dataset("dp_ids", data = np.asarray(dp_ids, dtype = np.int64))
         f.create_dataset("scalars", data = np.stack(scalars).astype(np.float32))
+        # Column names stored in the file, so data.py can select by name
         for name, values in (("node_columns", NODE_COLUMNS),
                              ("target_columns", TARGET_COLUMNS),
                              ("scalar_columns", SCALAR_COLUMNS)):
             f.create_dataset(name, data = np.array(values, dtype = object), dtype = str_dtype)
-        f.attrs["cropped"] = False
+        f.attrs["cropped"] = False      # the full domain; cropping happens at load time
         f.attrs["created"] = time.strftime("%Y-%m-%d %H:%M:%S")
  
     verify_written_file(OUT_PATH, param_table)
@@ -293,4 +306,3 @@ if __name__ == "__main__":
     except RuntimeError as exc:
         print(f"\nFAILED: {exc}", file = sys.stderr)
         sys.exit(1)
-                   
