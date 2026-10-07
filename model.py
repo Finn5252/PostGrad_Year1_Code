@@ -65,7 +65,7 @@ class SharedBlock(nn.Module):
         n_graphs: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         N = C.size(0)
-        # The graph width changes 3 -> 512 -> 512 through the stack. A mismatch here can broadcast silently instead of raising, so it is checked explicitly.
+        # The graph width changes 3 - 512 - 512 through the stack. Checked explicitly for any errors. 
         assert C.size(1) == self.graph_in, (
             f"graph signal C has {C.size(1)} features, expected {self.graph_in}"
         )
@@ -103,7 +103,7 @@ class SharedBlock(nn.Module):
             f"C_next has shape {tuple(C_next.shape)}, expected ({N}, {2 * self.hidden})"
         )
         # C_next and S_next are the next block's inputs
-        #  G and T are its shortcuts.
+        # G and T are its shortcuts.
         return C_next, S_next, G, T
 
 class GCNBlock(nn.Module):
