@@ -1,3 +1,4 @@
+# libraries
 from __future__ import annotations
 
 import csv
@@ -20,29 +21,30 @@ from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 
 #settings:
 
-H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"      
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\iter1"               
- 
-CROP = (-0.5, 2.0, 0.6, 1.4)        
-KNN_K = 4
-CACHE_DIR = "cache"                 
- 
+H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\iter1" 
+
+
+CROP = (-0.5, 2.0, 0.6, 1.4) # xmin, xmax, ymin, ymax: the meshing roi
+KNN_K = 4 # 4 nearest neighbours
+CACHE_DIR = "cache" # KNN graphs, keyed by the crop and k
+
 EPOCHS = 1000
-BATCH_SIZE = 1                      
+BATCH_SIZE = 1 # online learning
 LR = 1e-3
-PATIENCE = 200                      
-SEED = 0
- 
+PATIENCE = 200  # matched to the LR decay interval
+SEED = 0 # for replicability
+
 HIDDEN = 256
 SHARED_BLOCKS = 4
-GCN_BLOCKS = 3
- 
-ZERO_HANDLING = "mask"              
-ZERO_THRESHOLD = 1e-3
- 
-LOG_TEST_EACH_EPOCH = False         
+GCN_BLOCKS = 3 
 
-SMOKE = False                       
+ZERO_HANDLING = "mask"   
+ZERO_THRESHOLD = 1e-3
+
+LOG_TEST_EACH_EPOCH = False # if true, test curve alongside train and validation loss
+
+SMOKE = False  # True disables early stopping, for short test runs
 
 
 # configuration
@@ -53,10 +55,10 @@ class TrainConfig:
     epochs: int = EPOCHS
     batch_size: int = BATCH_SIZE
     lr: float = LR
-    betas: tuple[float, float] = (0.9, 0.999)
-    weight_decay: float = 0.0
-    lr_decay_rate: float = 0.9
-    lr_decay_every_epochs: int = 200
+    betas: tuple[float, float] = (0.9, 0.999)  # Adam momentum and scaling decay
+    weight_decay: float = 0.0           
+    lr_decay_rate: float = 0.9      
+    lr_decay_every_epochs: int = 200  
     early_stopping_patience: int = PATIENCE
     early_stopping_min_delta: float = 0.0
 
@@ -72,6 +74,7 @@ class TrainConfig:
     )
 
 def set_seed(seed: int) -> None:
+    "Four separate generators, because each library keeps its own"
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -80,12 +83,13 @@ def set_seed(seed: int) -> None:
 # Epoch helpers
 
 def _forward(model: GCNSurrogate, batch, device:str) -> tuple[torch.Tensor, torch.Tensor]:
+    # The model lives on the GPU, so the data has to follow it there.
     batch = batch.to(device)
     pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
     return pred, batch.y
 
 def run_epoch(model, loader, loss_fn, device, optimizer = None) -> float:
-    "case averaged loss returned per one pass"
+    "One complete pass over a dataset, returning the case-averaged loss."
     training = optimizer is not None
     model.train(training)
     acc = MeanAccumulator()
@@ -95,24 +99,28 @@ def run_epoch(model, loader, loss_fn, device, optimizer = None) -> float:
             pred, y = _forward(model, batch, device)
             loss = loss_fn(pred, y)
             if training:
+                # clear the previous gradients, adjust weights
                 optimizer.zero_grad(set_to_none = True)
                 loss.backward()
                 optimizer.step()
             n_graphs = int(batch.num_graphs)
+            # extracts the number; keeping the tensor would hold its whole computation graph alive and leak memory.
             acc.update(loss.item(), n = n_graphs)
     return acc.mean
 
 @torch.no_grad()
 def evaluate_relative_errors(model, loader, scalers: ScalerBundle, device: str, cfg: RelativeErrorConfig) -> dict:
-    "Relative L1/L2 on denormalised values, per target field"
+    "Relative L1/L2 on denormalised values, per target field."
     model.eval()
     acc = RelativeErrorAccumulator(scalers.target_columns, cfg)
 
+    # pass 1: field scale
     for batch in loader:
         y_true = scalers.target.inverse_transform(batch.y.to(device))
         acc.update_scale(y_true)
     acc.lock_scale()
 
+    # pass 2: the errors themselves, in Pa and m/s 
     for batch in loader:
         pred, y = _forward(model, batch, device)
         acc.update(scalers.target.inverse_transform(pred), scalers.target.inverse_transform(y),)
@@ -133,6 +141,7 @@ def train(
     train_ds, val_ds, test_ds, scalers, store = build_splits(data_cfg)
     scalers.save(out / "scalers.json")
 
+    # shuffle on training only 
     train_loader = DataLoader(train_ds, batch_size = train_cfg.batch_size, shuffle = True)
     val_loader = DataLoader(val_ds, batch_size = train_cfg.batch_size)
     test_loader = DataLoader(test_ds, batch_size = train_cfg.batch_size)
@@ -140,6 +149,7 @@ def train(
     model = GCNSurrogate(model_cfg).to(device)
     print(f"[train] {count_parameters(model):,} trainable parameters on {device}")
 
+    # 1/2 MSE
     loss_fn = lambda pred, target: 0.5 * nn.functional.mse_loss(pred, target)
     optimizer = torch.optim.Adam(
         model.parameters(), 
@@ -152,6 +162,7 @@ def train(
         optimizer, step_size = train_cfg.lr_decay_every_epochs, gamma = train_cfg.lr_decay_rate
     )
 
+    # Every setting written out before training starts
     (out / "config.json").write_text(
         json.dumps(
             {
@@ -197,12 +208,14 @@ def train(
                     "test_loss": test_loss,
                 }
             )
+            # flushed every epoch, so a crash still leaves a usable history
             fh.flush()
 
             # Selection and checkpointing look at the validation loss only
             if val_loss < best_val - train_cfg.early_stopping_min_delta:
                 best_val, best_epoch = val_loss, epoch
                 epochs_since_improvement = 0
+                # config travels with the weights
                 torch.save(
                     {
                         "epoch": epoch,
@@ -230,7 +243,7 @@ def train(
                 break
 
     # single, final test evaluation on the best checkpoint
-
+    # Reload best checkpoint.
     if ckpt_path.exists():
         model.load_state_dict(torch.load(ckpt_path, map_location = device)["model_state"])
     model.eval()
@@ -271,6 +284,7 @@ def train(
     return results
 
 def _jsonable(obj):
+    "Tuples become lists, recursively (JSON has no tuple type)"
     if isinstance(obj, dict):
         return {k: _jsonable(v) for k, v in obj.items()}
     if isinstance(obj, (list, tuple)):
@@ -280,6 +294,7 @@ def _jsonable(obj):
 def main() -> dict:
     data_cfg = DataConfig(
         h5_path = H5_PATH,
+        # CROP unpacks the four-tuple into four separate arguments
         crop = CropBox(*CROP) if CROP else None,
         knn_k = KNN_K,
         cache_dir = CACHE_DIR,
@@ -289,15 +304,18 @@ def main() -> dict:
         hidden = HIDDEN,
         n_shared_blocks = SHARED_BLOCKS,
         n_gcn_blocks = GCN_BLOCKS,
+        # Taken from the data config rather than typed twice
         n_scalar_features = len(data_cfg.scalar_columns),
         n_node_features = len(data_cfg.node_columns),
         n_outputs = len(data_cfg.target_columns),
     )
     train_cfg = TrainConfig(
+        # a billion: early stopping effectively never triggers during a smoke test
         early_stopping_patience = 10**9 if SMOKE else PATIENCE,
     )
     return train(data_cfg, model_cfg, train_cfg)
  
  
 if __name__ == "__main__":
+    # only runs when this file is executed directly, not when it is imported
     main()
