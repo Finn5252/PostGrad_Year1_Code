@@ -1,3 +1,5 @@
+# libraries
+
 from __future__ import annotations
 
 import json
@@ -17,23 +19,23 @@ from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"
 
-SPLIT = "test" # "train", "val" or "test"
+SPLIT = "test" # train, val or test
 THRESHOLDS = [1e-4, 1e-3, 1e-2, 5e-2, 1e-1]
 MODE = "mask"  # floor
 
 RHO = 1025.0 # working fluid density for the NMAPE reference
 
-EXPORT_CASES = 3               
+EXPORT_CASES = 3      
 EXPORT_DIR = RUN_DIR / "fields"
 
 PARITY_ALL = True # predicted vs actual for every test case
-PARITY_STRIDE = 10            
+PARITY_STRIDE = 10  
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
-    "Rebuild the model and the data config from the run directory"
+    "Rebuild the model and the data config from the run directory."
     cfg_path = RUN_DIR / "config.json"
     if not cfg_path.exists():
         raise FileNotFoundError(f"no config.json in {RUN_DIR}")
@@ -66,7 +68,7 @@ def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
 
 @torch.no_grad()
 def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConfig) -> dict:
-    "Two passes: field scale, then the errors themselves"
+    "Two passes: field scale, then the errors themselves."
     acc = RelativeErrorAccumulator(scalers.target_columns, cfg)
     for batch in loader:
         acc.update_scale(scalers.target.inverse_transform(batch.y.to(DEVICE)))
@@ -75,6 +77,7 @@ def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConf
     for batch in loader:
         batch = batch.to(DEVICE)
         pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
+        # both sides denormalized
         acc.update(
             scalers.target.inverse_transform(pred),
             scalers.target.inverse_transform(batch.y),
@@ -95,7 +98,7 @@ def nmape(model, loader, scalers: ScalerBundle) -> dict:
         y_true = scalers.target.inverse_transform(batch.y)
         scalars_phys = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())
 
-        # one graph at a time
+        # one graph at a time, since the reference differs per case
         offset = 0
         for g in range(scalars_phys.shape[0]):
             n = int((batch.batch == g).sum().item())
@@ -114,6 +117,7 @@ def export_fields(model, dataset, scalers: ScalerBundle, n_cases: int) -> None:
         data = dataset[j]
         dp_id = int(data.dp_id.item())
         batch = data.to(DEVICE)
+        # batch = None: a single graph, so every node belongs to case 0
         pred = model(batch.x, batch.edge_index, batch.scalars, None)
 
         xy = scalers.node.inverse_transform(batch.x.cpu().numpy())[:, :2]
@@ -139,7 +143,7 @@ def export_fields(model, dataset, scalers: ScalerBundle, n_cases: int) -> None:
 
 @torch.no_grad()
 def export_parity(model, loader, scalers: ScalerBundle, path: Path, stride: int) -> None:
-    "Predicted and actual for every case in the split"
+    "Predicted and actual for every case in the split. Only the target values and the camber are kept"
     preds, trues, cambers, dp_ids = [], [], [], []
     m_index = list(scalers.scalar_columns).index("m")
 
@@ -152,6 +156,7 @@ def export_parity(model, loader, scalers: ScalerBundle, path: Path, stride: int)
 
         preds.append(p.astype(np.float32))
         trues.append(t.astype(np.float32))
+        # one camber value repeated per node
         cambers.append(np.full(p.shape[0], s[0, m_index], dtype = np.float32))
         dp_ids.append(int(batch.dp_id[0].item()))
 
@@ -178,7 +183,7 @@ def main() -> None:
     loader = DataLoader(dataset, batch_size = 1)
     print(f"[eval] {SPLIT} split: {len(dataset)} cases")
 
-    # threshold sweep
+    # threshold sweep.
     rows = []
     for thr in THRESHOLDS:
         cfg = RelativeErrorConfig(mode = MODE, threshold = thr)
@@ -203,6 +208,7 @@ def main() -> None:
         print(line)
     print("=" * 78)
 
+    # the same model measured without a threshold 
     nm = nmape(model, loader, scalers)
     print("\n" + "=" * 78)
     print(f"NMAPE ({SPLIT} split)")
