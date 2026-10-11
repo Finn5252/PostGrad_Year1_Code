@@ -10,7 +10,7 @@ from scipy.interpolate import griddata
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter2")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
