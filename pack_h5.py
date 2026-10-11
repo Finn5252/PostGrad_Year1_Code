@@ -14,10 +14,10 @@ import pandas as pd
 
 # settings
 
-CSV_DIR = Path(r"C:\exports")
+CSV_DIR = Path(r"C:\Users\26664984\Documents\Masters\Simulations\revision 3\exports")
 CSV_GLOB = "*.csv"
-PARAM_TABLE = Path(r"C:\Users\26664984\Documents\Masters\Simulations\parameter set.csv")
-OUT_PATH = Path(r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5")
+PARAM_TABLE = Path(r"C:\Users\26664984\Documents\Masters\Simulations\revision 3\parameter set.csv")
+OUT_PATH = Path(r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5")
 
 LIMIT: Optional[int] = None # pilot processing
 
