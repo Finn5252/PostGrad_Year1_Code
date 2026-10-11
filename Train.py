@@ -25,7 +25,7 @@ H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hy
 OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\iter2"
 
 
-CROP = (-0.5, 2.0, 0.6, 1.4) # xmin, xmax, ymin, ymax: the meshing roi
+CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax: the meshing roi
 KNN_K = 4 # 4 nearest neighbours
 CACHE_DIR = "cache" # KNN graphs, keyed by the crop and k
 
