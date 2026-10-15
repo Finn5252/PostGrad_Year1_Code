@@ -17,7 +17,7 @@ PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
 LIFT_FILE = RUN_DIR / "lift_test.json"  # forces.py
 
 GRID_N = 400 # interpolation grid resolution along x
-SMOOTH_SIGMA = 1.0 # gaussian smoothing of the interpolated grid
+SMOOTH_SIGMA = 1.5 # gaussian smoothing of the interpolated grid
 N_CONTOURS = 25
 
 RHO = 1025.0 # fluid density

@@ -29,7 +29,7 @@ EXPORT_CASES = 3
 EXPORT_DIR = RUN_DIR / "fields"
 
 PARITY_ALL = True # predicted vs actual for every test case
-PARITY_STRIDE = 10  
+PARITY_STRIDE = 1  
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
