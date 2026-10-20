@@ -14,7 +14,7 @@ RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter2")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
-LIFT_FILE = RUN_DIR / "lift_test.json"  # forces.py
+FORCES_FILE = RUN_DIR / "forces_test.json"  # forces.py
 
 GRID_N = 400 # interpolation grid resolution along x
 SMOOTH_SIGMA = 1.5 # gaussian smoothing of the interpolated grid
@@ -245,7 +245,7 @@ def plot_parity() -> None:
 
     for k, name in enumerate(names):
         label, unit, scale, _ = FIELD_LABELS.get(name, (name,) + DEFAULT_FIELD[1:])
-        # small and semi-transparent, so density shows through the overplotting;
+        # small and semi-transparent
         sc = ax[k].scatter(true[:, k] * scale, pred[:, k] * scale,
                            c = camber, s = 0.3, alpha = 0.3,
                            cmap = "viridis", vmin = 0.0, vmax = 0.04,
@@ -273,53 +273,92 @@ def plot_parity() -> None:
     print(f"[plot] {out.name}  ({n_cases} cases)")
 
 
-def plot_lift_parity() -> None:
-    "Integrated lift coefficient, predicted against CFD, one point per case"
-    if not LIFT_FILE.exists():
-        print(f"[plot] no {LIFT_FILE.name}, skipping lift parity (run forces.py)")
-        return
-
-    rows = json.loads(LIFT_FILE.read_text())
-    true = np.array([r["Cl_cfd"] for r in rows])
-    pred = np.array([r["Cl_pred"] for r in rows])
-    v_in = np.array([r["V_in"] for r in rows])
-
+def _force_panel(ax, true, pred, v_in, label, symbol, band):
+    "One parity panel: predicted against CFD, one point per case."
     err = pred - true
     mean_abs = float(np.abs(err).mean())
-    rel = float(100.0 * (np.abs(err) / np.maximum(np.abs(true), 1e-12)).mean())
+    rel = float(100.0 * (
+        np.abs(err) / np.maximum(np.abs(true), 1e-12)
+    ).mean())
     bias = float(err.mean())
 
-    fig, ax = plt.subplots(figsize = (6.5, 6))
-    # coloured by inlet velocity
-    sc = ax.scatter(true, pred, c = v_in, s = 22, cmap = "plasma",
-                    edgecolor = "k", linewidth = 0.3, zorder = 3)
+    sc = ax.scatter(
+        true, pred, c=v_in, s=22, cmap="plasma",
+        edgecolor="k", linewidth=0.3, zorder=3
+    )
 
     lo = min(true.min(), pred.min())
     hi = max(true.max(), pred.max())
-    pad = 0.05 * (hi - lo)
+    pad = 0.05 * (hi - lo) if hi > lo else 0.05
     line = np.array([lo - pad, hi + pad])
-    ax.plot(line, line, "r--", linewidth = 1, label = "1:1 line", zorder = 2)
-    # 5% 
-    ax.plot(line, line * 1.05, "k--", linewidth = 0.7, label = "+5% error", zorder = 2)
-    ax.plot(line, line * 0.95, "k--", linewidth = 0.7, label = "-5% error", zorder = 2)
+
+    ax.plot(line, line, "r--", linewidth=1,
+            label="1:1 line", zorder=2)
+    ax.plot(line, line * (1 + band), "k--", linewidth=0.7,
+            label=f"+{band:.0%} error", zorder=2)
+    ax.plot(line, line * (1 - band), "k--", linewidth=0.7,
+            label=f"-{band:.0%} error", zorder=2)
 
     ax.set_xlim(line)
     ax.set_ylim(line)
-    ax.set_xlabel("CFD lift coefficient, $C_L$")
-    ax.set_ylabel("Predicted lift coefficient, $C_L$")
-    ax.set_aspect("equal", adjustable = "box")
-    ax.grid(True, alpha = 0.2)
-    ax.legend(loc = "upper left", fontsize = 8)
-    fig.colorbar(sc, ax = ax, label = "inlet velocity [m/s]")
+    ax.set_xlabel(f"CFD {label}, {symbol}")
+    ax.set_ylabel(f"Predicted {label}, {symbol}")
+    ax.set_aspect("equal", adjustable="box")
+    ax.grid(True, alpha=0.2)
+    ax.legend(loc="upper left", fontsize=8)
+    ax.set_title(
+        f"{label}\nmean |error| = {mean_abs:.5f} ({rel:.2f}%), "
+        f"bias = {bias:+.5f}",
+        fontsize=10
+    )
+    return sc, rel
 
-    ax.set_title(f"Integrated lift -- {len(rows)} cases\n"
-                 f"mean |error| = {mean_abs:.4f} ({rel:.2f}%),  bias = {bias:+.4f}",
-                 fontsize = 10)
-    fig.tight_layout()
-    out = FIG_DIR / "lift_parity.png"
-    fig.savefig(out, dpi = DPI, bbox_inches = "tight")
+
+def plot_force_parity() -> None:
+    "Integrated lift and pressure drag, predicted against CFD."
+    if not FORCES_FILE.exists():
+        print(
+            f"[plot] no {FORCES_FILE.name}, "
+            "skipping force parity (run forces.py)"
+        )
+        return
+
+    rows = json.loads(FORCES_FILE.read_text())
+    v_in = np.array([r["V_in"] for r in rows])
+
+    fig, ax = plt.subplots(1, 2, figsize=(13, 6))
+
+    sc, rel_l = _force_panel(
+        ax[0],
+        np.array([r["Cl_cfd"] for r in rows]),
+        np.array([r["Cl_pred"] for r in rows]),
+        v_in, "lift coefficient", "$C_L$", 0.05,
+    )
+
+    _, rel_d = _force_panel(
+        ax[1],
+        np.array([r["Cdp_cfd"] for r in rows]),
+        np.array([r["Cdp_pred"] for r in rows]),
+        v_in, "pressure drag coefficient", "$C_{D,p}$", 0.20,
+    )
+
+    fig.colorbar(
+        sc, ax=ax, label="inlet velocity [m/s]", fraction=0.025
+    )
+    fig.suptitle(
+        f"Integrated forces -- {len(rows)} cases. "
+        "Pressure drag excludes the viscous component.",
+        fontsize=10
+    )
+
+    out = FIG_DIR / "force_parity.png"
+    fig.savefig(out, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
-    print(f"[plot] {out.name}  mean |error| = {rel:.2f}% of the CFD value")
+    print(
+        f"[plot] {out.name}  Cl {rel_l:.2f}%, "
+        f"Cdp {rel_d:.2f}%"
+    )
+
 
 
 def plot_history() -> None:
@@ -387,7 +426,7 @@ def main() -> None:
 
     # entire test split
     plot_parity()
-    plot_lift_parity()
+    plot_force_parity()
     plot_history()
     print(f"[plot] figures in {FIG_DIR}")
 
