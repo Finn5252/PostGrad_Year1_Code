@@ -100,8 +100,12 @@ def panels(outline: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
 
 # forces
 
-def integrate(xy: np.ndarray, pressure: np.ndarray, outline: np.ndarray) -> tuple[float, float]:
-    "Return (lift per unit depth, fraction of panels matched)."
+def integrate(
+    xy: np.ndarray,
+    pressure: np.ndarray,
+    outline: np.ndarray
+) -> tuple[float, float, float]:
+    """Return (lift, pressure drag, fraction of panels matched)."""
     mid, normal, ds = panels(outline)
     tree = cKDTree(xy)
     probe = mid + QUERY_OFFSET * normal
@@ -109,15 +113,19 @@ def integrate(xy: np.ndarray, pressure: np.ndarray, outline: np.ndarray) -> tupl
 
     ok = dist < 50 * QUERY_OFFSET
     if not ok.any():
-        return float("nan"), 0.0
+        return float("nan"), float("nan"), 0.0
 
     p = pressure[idx[ok]]
-    force = -(p[:, None] * normal[ok] * ds[ok, None]).sum(axis = 0)
-    return float(force[1]), float(ok.mean())
+    force = -(p[:, None] * normal[ok] * ds[ok, None]).sum(axis=0)
+
+    return float(force[1]), float(force[0]), float(ok.mean())
 
 
 def lift_coefficient(lift: float, v_in: float) -> float:
     return lift / (0.5 * RHO * v_in**2 * CHORD)
+
+def drag_coefficient(drag: float, v_in: float) -> float:
+    return drag / (0.5 * RHO * v_in**2 * CHORD)
 
 
 def load_run() -> tuple[GCNSurrogate, DataConfig]:
@@ -170,19 +178,23 @@ def main() -> None:
         outline = foil_outline(float(s[i_m]), float(s[i_p]), float(s[i_t]),
                                float(s[i_aoa]))
         # The same integration applied to both
-        lift_p, matched = integrate(xy, p_pred, outline)
-        lift_t, _ = integrate(xy, p_true, outline)
+        lift_p, drag_p, matched = integrate(xy, p_pred, outline)
+        lift_t, drag_t, _ = integrate(xy, p_true, outline)
 
         rows.append({
             "dp_id": int(batch.dp_id[0].item()),
             "V_in": float(s[i_v]),
             "Cl_cfd": lift_coefficient(lift_t, float(s[i_v])),
             "Cl_pred": lift_coefficient(lift_p, float(s[i_v])),
+            "Cdp_cfd": drag_coefficient(drag_t, float(s[i_v])),
+            "Cdp_pred": drag_coefficient(drag_p, float(s[i_v])),
             "panels_matched": matched,
         })
 
     cl_t = np.array([r["Cl_cfd"] for r in rows])
     cl_p = np.array([r["Cl_pred"] for r in rows])
+    cdp_t = np.array([r["Cdp_cfd"] for r in rows])
+    cdp_p = np.array([r["Cdp_pred"] for r in rows])
     matched = np.array([r["panels_matched"] for r in rows])
 
     def summary(true, pred, label):
@@ -196,12 +208,12 @@ def main() -> None:
               f"(dp {rows[int(np.abs(err).argmax())]['dp_id']})")
         print(f"    bias             {err.mean():>+9.4f}")
 
-    print(f"Integrated lift, {SPLIT} split ({len(rows)} cases)")
+    print(f"Integrated forces, {SPLIT} split ({len(rows)} cases)")
     print(f"  panels matched to a cell: {matched.mean():.1%} "
           f"(worst case {matched.min():.1%})")
     summary(cl_t, cl_p, "lift coefficient Cl")
-
-    out = RUN_DIR / f"lift_{SPLIT}.json"
+    summary(cdp_t, cdp_p, "pressure drag coefficient Cdp")
+    out = RUN_DIR / f"forces_{SPLIT}.json"
     out.write_text(json.dumps(rows, indent = 2))
     print(f"[forces] per-case values -> {out.name}")
     store.close()
