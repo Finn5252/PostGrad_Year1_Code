@@ -15,8 +15,8 @@ from model import GCNSurrogate, GCNSurrogateConfig
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
-H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter2")
+H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
 
 SPLIT = "test" # use test distribution 
 
@@ -196,16 +196,10 @@ def main() -> None:
               f"(dp {rows[int(np.abs(err).argmax())]['dp_id']})")
         print(f"    bias             {err.mean():>+9.4f}")
 
-    print("\n" + "=" * 72)
     print(f"Integrated lift, {SPLIT} split ({len(rows)} cases)")
-    print("=" * 72)
     print(f"  panels matched to a cell: {matched.mean():.1%} "
           f"(worst case {matched.min():.1%})")
     summary(cl_t, cl_p, "lift coefficient Cl")
-    print("=" * 72)
-    print("Both columns are integrated the same way, so this isolates the surrogate's")
-    print("error. Validate the integration itself by comparing Cl_cfd against the lift")
-    print("reported by Fluent (P19 in the design point table) before trusting Cl_pred.")
 
     out = RUN_DIR / f"lift_{SPLIT}.json"
     out.write_text(json.dumps(rows, indent = 2))

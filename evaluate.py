@@ -16,8 +16,8 @@ from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
-H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5"
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter2")
+H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
 
 SPLIT = "test" # train, val or test
 THRESHOLDS = [1e-4, 1e-3, 1e-2, 5e-2, 1e-1]
@@ -29,7 +29,7 @@ EXPORT_CASES = 3
 EXPORT_DIR = RUN_DIR / "fields"
 
 PARITY_ALL = True # predicted vs actual for every test case
-PARITY_STRIDE = 10  
+PARITY_STRIDE = 1  
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 

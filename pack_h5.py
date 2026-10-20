@@ -14,10 +14,10 @@ import pandas as pd
 
 # settings
 
-CSV_DIR = Path(r"C:\exports")
+CSV_DIR = Path(r"C:\Users\26664984\Documents\Masters\Simulations\revision 3\exports")
 CSV_GLOB = "*.csv"
-PARAM_TABLE = Path(r"C:\Users\26664984\Documents\Masters\Simulations\parameter set.csv")
-OUT_PATH = Path(r"C:\Users\26664984\Documents\Masters\hdf5_training_data\hydrofoil.h5")
+PARAM_TABLE = Path(r"C:\Users\26664984\Documents\Masters\Simulations\revision 3\parameter set.csv")
+OUT_PATH = Path(r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5")
 
 LIMIT: Optional[int] = None # pilot processing
 
@@ -31,7 +31,7 @@ EXCLUDE_DP_IDS = {0} # DP 0 is the Workbench base design point, not part of the 
 PROGRESS_EVERY = 25
 
 # The export writes the coordinates twice, reversed, at positions 6 and 7. USE_COLS keeps the first occurrence of each
-CSV_HEADER = ["cellnumber", "x-coordinate", "y-coordinate", "velocity-magnitude", "pressure", "cell-volume", "y-coordinate", "x-coordinate",]
+CSV_HEADER = ["cellnumber", "x-coordinate", "y-coordinate", "velocity-magnitude", "pressure", "cell-volume"]
 USE_COLS = [0, 1, 2, 3, 4, 5]
 
 NODE_COLUMNS = ["x", "y", "cell_volume"]

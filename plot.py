@@ -10,14 +10,14 @@ from scipy.interpolate import griddata
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter1")
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\iter2")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
 LIFT_FILE = RUN_DIR / "lift_test.json"  # forces.py
 
 GRID_N = 400 # interpolation grid resolution along x
-SMOOTH_SIGMA = 1.0 # gaussian smoothing of the interpolated grid
+SMOOTH_SIGMA = 1.5 # gaussian smoothing of the interpolated grid
 N_CONTOURS = 25
 
 RHO = 1025.0 # fluid density
