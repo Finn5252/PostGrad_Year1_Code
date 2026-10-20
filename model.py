@@ -13,7 +13,6 @@ from torch_geometric.nn import GCNConv, global_mean_pool
 @dataclass
 class GCNSurrogateConfig:
     "Dimensions and depth"
-
     n_node_features: int = 3 # x, y, cell volume
     n_scalar_features: int = 5 # m, p, t, AoA, V_in
     n_outputs: int = 2 # static pressure, velocity magnitude
@@ -56,8 +55,8 @@ class SharedBlock(nn.Module):
 
     def forward(
         self,
-        C: Tensor, # graph signal in:  one row per cell
-        S: Tensor, # scalar signal in: one row per case
+        C: Tensor, # graph signal in,  one row per cell
+        S: Tensor, # scalar signal in, one row per case
         Z: Optional[Tensor], # graph shortcut from the previous block
         Q: Optional[Tensor], # scalar shortcut from the previous block
         edge_index: Tensor,
@@ -76,14 +75,14 @@ class SharedBlock(nn.Module):
             f"S has {S.size(0)} rows but the batch holds {n_graphs} graphs"
         )
 
-        # Mesh pathway. The convolution blends each cell with its four nearest neighbours
+        # Mesh pathway. The convolution averages each cell with its four nearest neighbours
         # The shortcut provides the distinctions that averaging would otherwise oversmooth
         G = self.conv(C, edge_index)
         if self.skip_graph is not None:
             G = G + self.skip_graph(Z)
         G = self.act(G)
 
-        # Case pathway.
+        # Case pathway
         T = self.fc(S)
         if self.skip_scalar is not None:
             T = T + self.skip_scalar(Q)
