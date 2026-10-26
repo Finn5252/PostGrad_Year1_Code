@@ -382,7 +382,7 @@ class GraphDataset(torch.utils.data.Dataset):
         # [None, :] makes it (1, 5) rather than (5,) 
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
-        data.case_index = torch.tensor([i], dtype=torch.long)
+        data.case_id = torch.tensor([i], dtype=torch.long)
         return data
 
 def _split_indices(
