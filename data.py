@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -21,14 +22,12 @@ MIN_NODES_AFTER_CROP = 16   # a case with fewer than this inside the box is an e
 
 @dataclass(frozen = True)
 class CropBox:
-    # frozen: the bounds go into the cache key, so a box that changed after the graphs were built would give a silent mismatch
     x_min: float
     x_max: float
     y_min: float
     y_max: float
 
     def mask(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        # x and y are whole arrays; & is elementwise, so this returns one bool per cell
         return (x >= self.x_min) & (x <= self.x_max) & (y >= self.y_min) & (y <= self.y_max)
 
 @dataclass
@@ -46,6 +45,9 @@ class DataConfig:
     knn_k: int = 4
     cache_dir: str = "cache"
 
+    # KNN graph with gaussian weights, used by the loss only. None leaves it out
+    reg_k: Optional[int] = None
+
     split_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1)
     split_seed: int = 0
 
@@ -54,6 +56,8 @@ class DataConfig:
             raise ValueError(f"split fractions must be sum to 1, got {self.split_fractions}")
         if self.knn_k < 1:
             raise ValueError("knn_k must be >=1")
+        if self.reg_k is not None and self.reg_k < 1:
+            raise ValueError("reg_k must be >=1, or None to disable the regularization graph")
         # cropping reads x and y out of the node matrix, so they have to be in it
         for name in (self.x_column, self.y_column):
             if name not in self.node_columns:
@@ -74,6 +78,20 @@ class DataConfig:
             "knn_k": self.knn_k,
         }
         # sort_keys, or the same settings could hash differently between runs
+        blob = json.dumps(payload, sort_keys = True).encode()
+        return hashlib.sha256(blob).hexdigest()[:16]
+
+    def reg_cache_key(self, store_fingerprint: str, version: str) -> str:
+        "Identifies a cached regularization graph. Kept separate, so the model's KNN cache is untouched"
+        payload = {
+            "store": store_fingerprint,
+            "x_column": self.x_column,
+            "y_column": self.y_column,
+            "crop": asdict(self.crop) if self.crop is not None else None,
+            "reg_k": self.reg_k,
+            # changing the weighting formula must invalidate old caches
+            "version": version,
+        }
         blob = json.dumps(payload, sort_keys = True).encode()
         return hashlib.sha256(blob).hexdigest()[:16]
 
@@ -276,7 +294,7 @@ class CaseStore:
                     f"case {i} (dp_id={dp_id}) has only {n_kept} nodes inside the crop "
                     f"box {crop}; minimum is {MIN_NODES_AFTER_CROP}"
                 )
-            # the same boolean applied to both, so nodes and targets stay aligned
+            # same boolean applied to both, therefore nodes and targets stay aligned
             nodes, targets = nodes[keep], targets[keep]
         return nodes, targets, scalars, dp_id
 
@@ -296,11 +314,38 @@ def knn_edge_index(xy: np.ndarray, k: int) -> np.ndarray:
     src = np.repeat(np.arange(n, dtype = np.int64), k_eff)
     dst = idx[:, 1:].reshape(-1).astype(np.int64)   # [:, 1:] drops the self-match
 
-    # Nearest-neighbour relations are not mutual, so both directions are added and the duplicates this creates are then removed.
+    # Nearest-neighbour relations are not mutual - both directions are added and the duplicates created are then removed.
     src, dst = np.concatenate([src, dst]), np.concatenate([dst, src])
     keep = src != dst
     pairs = np.unique(np.stack([src[keep], dst[keep]], axis = 1), axis = 0)
     return pairs.T.astype(np.int64)
+
+def gaussian_knn_pairs(xy: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
+    "Gaussian-weighted KNN pairs (E, 2) with i < j, and their weights (E,), on raw coordinates in metres"
+    n = xy.shape[0]
+    k_eff = min(k, n - 1)
+    if k_eff < 1:
+        return np.zeros((0, 2), dtype = np.int32), np.zeros(0, dtype = np.float32)
+
+    tree = cKDTree(xy)
+    dist, idx = tree.query(xy, k = k_eff + 1)     # column 0 is the point itself
+    dist, idx = np.atleast_2d(dist), np.atleast_2d(idx)
+    # local scale: distance to the k-th neighbour, kernel follows the mesh density
+    # np.maximum guards duplicate coordinates, where that distance could be 0
+    sigma = np.maximum(dist[:, -1], np.finfo(np.float64).tiny)
+
+    src = np.repeat(np.arange(n, dtype = np.int64), k_eff)
+    dst = idx[:, 1:].reshape(-1).astype(np.int64)
+
+    # i chose j and j chose i collapse to one pair
+    lo, hi = np.minimum(src, dst), np.maximum(src, dst)
+    keep = lo != hi
+    code = np.unique(lo[keep] * n + hi[keep])
+    lo, hi = code // n, code % n
+
+    d2 = ((xy[lo] - xy[hi]) ** 2).sum(axis = 1)
+    w = np.exp(-d2 / (sigma[lo] * sigma[hi]))
+    return np.stack([lo, hi], axis = 1).astype(np.int32), w.astype(np.float32)
 
 class GraphCache:
     "On-disk cache of the KNN connectivity, keyed by the crop + KNN configuration."
@@ -313,7 +358,6 @@ class GraphCache:
 
     def build_or_load(self, verbose: bool = True) -> None:
         if self.path.exists():
-            # same offsets pattern as the HDF5, applied to edges rather than nodes
             with np.load(self.path) as z:
                 flat, offsets = z["edges"], z["edge_offsets"]
             self._edges = [
@@ -343,6 +387,78 @@ class GraphCache:
             self.build_or_load()
         return self._edges[i]
 
+class RegGraphCache:
+    "On-disk cache of the gaussian regularization graphs, memory-mapped and read one case at a time"
+    VERSION = "gaussian-local-scaling-v1"
+
+    def __init__(self, cfg: DataConfig, store: CaseStore) -> None:
+        if cfg.reg_k is None:
+            raise ValueError("RegGraphCache needs cfg.reg_k")
+        self.key = cfg.reg_cache_key(store.fingerprint, self.VERSION)
+        self.dir = Path(cfg.cache_dir) / f"reg_knn_{self.key}"
+        self.cfg = cfg
+        self.store = store
+        self._pairs: Optional[np.ndarray] = None
+        self._weights: Optional[np.ndarray] = None
+        self._offsets: Optional[np.ndarray] = None
+
+    def build_or_load(self, verbose: bool = True) -> None:
+        if not (self.dir / "offsets.npy").exists():
+            self._build(verbose)
+        elif verbose:
+            print(f"[data] loaded cached regularization graphs from {self.dir}")
+
+        self._offsets = np.load(self.dir / "offsets.npy")
+        if int(self._offsets[-1]) == 0:
+            raise RuntimeError(f"regularization cache {self.dir} holds no pairs")
+        self._pairs = np.memmap(self.dir / "pairs.bin", dtype = np.int32, mode = "r").reshape(-1, 2)
+        self._weights = np.memmap(self.dir / "weights.bin", dtype = np.float32, mode = "r")
+        n_total = int(self._offsets[-1])
+        if self._pairs.shape[0] != n_total or self._weights.shape[0] != n_total:
+            raise RuntimeError(f"regularization cache {self.dir} is inconsistent; delete it to rebuild")
+
+    def _build(self, verbose: bool) -> None:
+        k = self.cfg.reg_k
+        # built in a _tmp folder and renamed when complete, so a half-built cache is never used
+        tmp = self.dir.with_name(self.dir.name + "_tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp) # left over from an interrupted build
+        tmp.mkdir(parents = True)
+        if verbose:
+            print(f"[data] building Gaussian regularization graphs (k={k}) -> {self.dir}")
+
+        offsets = [0]
+        with open(tmp / "pairs.bin", "wb") as fp, open(tmp / "weights.bin", "wb") as fw:
+            for i in range(self.store.n_cases):
+                nodes, _, _, _ = self.store.cropped_case(i)
+                xy = nodes[:, [self.store.x_pos, self.store.y_pos]]
+                pairs, w = gaussian_knn_pairs(xy, k)
+                # appended case after case
+                pairs.tofile(fp)
+                w.tofile(fw)
+                offsets.append(offsets[-1] + len(w))
+                if verbose and i == 0:
+                    q = np.quantile(w, [0.05, 0.5, 0.95])
+                    print(
+                        f"[data]   case 0: {xy.shape[0]} nodes, {len(w)} pairs "
+                        f"({2 * len(w) / xy.shape[0]:.1f} neighbours per node on average), "
+                        f"weights 5/50/95% = {q[0]:.2f}/{q[1]:.2f}/{q[2]:.2f}"
+                    )
+                if verbose and (i + 1) % 100 == 0:
+                    print(f"[data]   {i + 1}/{self.store.n_cases} cases")
+
+        # offsets written last
+        np.save(tmp / "offsets.npy", np.asarray(offsets, dtype = np.int64))
+        if self.dir.exists():
+            shutil.rmtree(self.dir)
+        tmp.rename(self.dir)
+
+    def __getitem__(self, i: int) -> tuple[np.ndarray, np.ndarray]:
+        if self._offsets is None:
+            self.build_or_load()
+        a, b = int(self._offsets[i]), int(self._offsets[i + 1])
+        return self._pairs[a:b], self._weights[a:b]
+
 # Dataset
 
 class GraphDataset(torch.utils.data.Dataset):
@@ -354,11 +470,13 @@ class GraphDataset(torch.utils.data.Dataset):
             cache: GraphCache,
             indices: Sequence[int],
             scalers: ScalerBundle,
+            reg_cache: Optional[RegGraphCache] = None,
     ) -> None:
         self.store = store
         self.cache = cache
         self.indices = list(indices)
         self.scalers = scalers
+        self.reg_cache = reg_cache
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -383,11 +501,21 @@ class GraphDataset(torch.utils.data.Dataset):
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
         data.case_id = torch.tensor([i], dtype=torch.long)
+
+        if self.reg_cache is not None:
+            pairs, w = self.reg_cache[i]
+            if pairs.size and int(pairs.max()) >= nodes.shape[0]:
+                raise RuntimeError(
+                    f"cached regularization graph for case {i} references node {int(pairs.max())} "
+                    f"but the cropped case has {nodes.shape[0]} nodes -- the cache is stale"
+                )
+            data.reg_edge_index = torch.from_numpy(np.ascontiguousarray(pairs.T, dtype = np.int64))
+            data.reg_edge_weight = torch.from_numpy(np.array(w, dtype = np.float32))
         return data
 
 def _split_indices(
     n: int, fractions: tuple[float, float, float], seed: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    # Shuffled before slicing, because the DOE is ordered
+    # Shuffled before slicing
     rng = np.random.default_rng(seed)
     perm = rng.permutation(n)
     n_train = min(int(round(fractions[0] * n)), n)
@@ -426,6 +554,11 @@ def build_splits(
     cache = GraphCache(cfg, store)
     cache.build_or_load(verbose=verbose)
 
+    reg_cache = None
+    if cfg.reg_k is not None:
+        reg_cache = RegGraphCache(cfg, store)
+        reg_cache.build_or_load(verbose=verbose)
+
     train_idx, val_idx, test_idx = _split_indices(
         store.n_cases, cfg.split_fractions, cfg.split_seed
     )
@@ -451,9 +584,9 @@ def build_splits(
         )
 
     return (
-        GraphDataset(store, cache, train_idx, scalers),
-        GraphDataset(store, cache, val_idx, scalers),
-        GraphDataset(store, cache, test_idx, scalers),
+        GraphDataset(store, cache, train_idx, scalers, reg_cache),
+        GraphDataset(store, cache, val_idx, scalers, reg_cache),
+        GraphDataset(store, cache, test_idx, scalers, reg_cache),
         scalers,
         store,
     )
