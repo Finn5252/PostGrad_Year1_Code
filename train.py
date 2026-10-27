@@ -18,7 +18,7 @@ from torch_geometric.loader import DataLoader
 from data import CropBox, DataConfig, ScalerBundle, build_splits
 from metrics import (MeanAccumulator, RelativeErrorAccumulator, RelativeErrorConfig)
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
-from regularization import REG_MODES, laplacian_penalty
+from regularisation import REG_MODES, laplacian_penalty
 
 #settings
 
