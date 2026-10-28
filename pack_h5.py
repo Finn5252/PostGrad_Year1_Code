@@ -57,8 +57,7 @@ def read_case(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         path,
         header = 0,
         usecols = USE_COLS,
-        # Positional names, so the duplicated column names in the file cannot create an
-        # ambiguity about which one was read.
+        # Positional names
         names = [f"c{i}" for i in range(len(CSV_HEADER))],
         dtype = np.float64,
         skipinitialspace = True,
