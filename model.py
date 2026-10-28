@@ -29,7 +29,7 @@ class SharedBlock(nn.Module):
     """shared GCN/FC block:
     Two pathways side by side, with one carrying a row per mesh cell and the other
     carrying a row of case (boundary/scalar) parameters. The mesh is averaged down into the
-    case pathway, then the fused result is copied back out to every cell.
+    case pathway, then the merged result is copied back out to every cell.
     """
 
     def __init__(
@@ -48,7 +48,7 @@ class SharedBlock(nn.Module):
         self.fc = nn.Linear(scalar_in, hidden)
 
         # skip_in is none only for block 1, which has no preceding block to take a shortcut from.
-        # Elsewhere the shortcut passes through a learned layer
+        # every where else the shortcut passes through a learned layer
         self.skip_graph = nn.Linear(skip_in, hidden) if skip_in is not None else None
         self.skip_scalar = nn.Linear(skip_in, hidden) if skip_in is not None else None
         self.act = nn.ReLU()
