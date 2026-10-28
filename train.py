@@ -23,7 +23,7 @@ from regularisation import REG_MODES, laplacian_penalty
 #settings
 
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\iter2"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\regularisation"
 
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
@@ -98,7 +98,7 @@ def set_seed(seed: int) -> None:
 # Epoch helpers
 
 def _forward(model: GCNSurrogate, batch, device:str):
-    # The model lives on the GPU, so the data has to follow it there.
+    # data onto gpu
     # whole batch returned, the regularizer needs reg_edge_index and its weights
     batch = batch.to(device)
     pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
