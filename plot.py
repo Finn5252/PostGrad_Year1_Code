@@ -339,7 +339,7 @@ def plot_force_parity() -> None:
         ax[1],
         np.array([r["Cdp_cfd"] for r in rows]),
         np.array([r["Cdp_pred"] for r in rows]),
-        v_in, "pressure drag coefficient", "$C_{D,p}$", 0.20,
+        v_in, "pressure drag coefficient", "$C_{D,p}$", 0.10,
     )
 
     fig.colorbar(
