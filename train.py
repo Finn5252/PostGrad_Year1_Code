@@ -42,7 +42,7 @@ GCN_BLOCKS = 3
 
 # smoothness regularization
 REG_K = 12 # neighbours in the gaussian graph for the smoothing loss
-REG_LAMBDA = 0.25 # 0 = baseline run
+REG_LAMBDA = 1 # 0 = baseline run
 REG_MODE = "error" # "error" penalises roughness of prediction - target
 
 ZERO_HANDLING = "mask"   
