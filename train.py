@@ -23,7 +23,7 @@ from regularisation import REG_MODES, laplacian_penalty
 #settings
 
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\regularisation"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\regularisation_lambda_01"
 
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
