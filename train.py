@@ -41,7 +41,7 @@ SHARED_BLOCKS = 4
 GCN_BLOCKS = 3 
 
 # smoothness regularization
-REG_K = 0 # neighbours in the gaussian graph for the smoothing loss
+REG_K = None # neighbours in the gaussian graph for the smoothing loss
 REG_LAMBDA = 0 
 REG_MODE = "error" # "error" penalises roughness of prediction - target
 
