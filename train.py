@@ -33,6 +33,8 @@ CACHE_DIR = "cache" # KNN graphs
 EPOCHS = 1000
 BATCH_SIZE = 1 # number of batches during training
 LR = 1e-3
+LR_SCHEDULE = "cosine" # "cosine" or "step"
+LR_MIN = 1e-5 # learning rate reached at the final epoch (cosine only)
 PATIENCE = 200  # how many epochs validation loss must see no improvement for before early stopping
 SEED = 0 # for replicability
 
@@ -65,6 +67,8 @@ class TrainConfig:
     weight_decay: float = 0.0           
     lr_decay_rate: float = 0.9      
     lr_decay_every_epochs: int = 200  
+    lr_schedule: str = LR_SCHEDULE
+    lr_min: float = LR_MIN
     early_stopping_patience: int = PATIENCE
     early_stopping_min_delta: float = 0.0
 
@@ -87,6 +91,8 @@ class TrainConfig:
             raise ValueError("reg_lambda must be >= 0")
         if self.reg_mode not in REG_MODES:
             raise ValueError(f"reg_mode must be one of {REG_MODES}, got {self.reg_mode!r}")
+        if self.lr_schedule not in ("cosine", "step"):
+            raise ValueError(f"lr_schedule must be 'cosine' or 'step', got {self.lr_schedule!r}")
 
 def set_seed(seed: int) -> None:
     "Four separate generators, because each library keeps its own"
@@ -200,9 +206,14 @@ def train(
         weight_decay = train_cfg.weight_decay,
     )
 
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size = train_cfg.lr_decay_every_epochs, gamma = train_cfg.lr_decay_rate
-    )
+    if train_cfg.lr_schedule == "cosine":
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max = train_cfg.epochs, eta_min = train_cfg.lr_min
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size = train_cfg.lr_decay_every_epochs, gamma = train_cfg.lr_decay_rate
+        )
 
     # Every setting written out before training starts
     (out / "config.json").write_text(
