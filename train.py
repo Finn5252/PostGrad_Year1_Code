@@ -23,7 +23,7 @@ from regularisation import REG_MODES, laplacian_penalty
 #settings
 
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\regularisation_lambda_01"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine"
 
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
@@ -41,8 +41,8 @@ SHARED_BLOCKS = 4
 GCN_BLOCKS = 3 
 
 # smoothness regularization
-REG_K = 12 # neighbours in the gaussian graph for the smoothing loss
-REG_LAMBDA = 0.1 
+REG_K = 0 # neighbours in the gaussian graph for the smoothing loss
+REG_LAMBDA = 0 
 REG_MODE = "error" # "error" penalises roughness of prediction - target
 
 ZERO_HANDLING = "mask"   
