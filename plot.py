@@ -392,9 +392,9 @@ def plot_history() -> None:
                 textcoords = "offset points", fontsize = 8)
 
     # mark the learning-rate decay steps 
-    for i in range(1, len(lr)):
-        if lr[i] < lr[i - 1]:
-            ax.axvline(epochs[i], color = "grey", linestyle = "--", linewidth = 0.5)
+    #for i in range(1, len(lr)):
+        #if lr[i] < lr[i - 1]:
+            #ax.axvline(epochs[i], color = "grey", linestyle = "--", linewidth = 0.5)
 
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Loss")
