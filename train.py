@@ -23,14 +23,14 @@ from regularisation import REG_MODES, laplacian_penalty
 #settings
 
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation"
 
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
 KNN_K = 4 # k nearest neighbours for gcn
 CACHE_DIR = "cache" # KNN graphs
 
-TARGET_NORMALISATION = "none" # "none" or "freestream" (Cp and V / V_in, then min-max)
+TARGET_NORMALISATION = "freestream" # "none" or "freestream" (Cp and V / V_in, then min-max)
 RHO = 1025.0 # working fluid density for Cp
 
 EPOCHS = 1000
