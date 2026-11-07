@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
 
-from data import CropBox, DataConfig, ScalerBundle, build_splits
+from data import CropBox, DataConfig, ScalerBundle, build_splits, targets_to_physical
 from metrics import (NMAPEAccumulator, RelativeErrorAccumulator, RelativeErrorConfig,
                      reference_values)
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
@@ -53,7 +53,11 @@ def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
         cache_dir = data_saved["cache_dir"],
         split_fractions = tuple(data_saved["split_fractions"]),
         split_seed = data_saved["split_seed"],
+        # the run's own setting, not train.py's. Older runs were not normalised
+        target_normalisation = data_saved.get("target_normalisation", "none"),
+        rho = data_saved.get("rho", 1025.0),
     )
+    check_scalers(data_cfg, RUN_DIR)
 
     model_cfg = GCNSurrogateConfig(**saved["model"])
     model = GCNSurrogate(model_cfg).to(DEVICE)
@@ -66,12 +70,25 @@ def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
     return model, data_cfg, saved
 
 
+def check_scalers(data_cfg: DataConfig, run_dir: Path) -> None:
+    "The saved scalers.json must agree with config.json on the normalisation"
+    path = run_dir / "scalers.json"
+    if not path.exists():
+        return
+    saved = ScalerBundle.load(path)
+    if (saved.target_normalisation, saved.rho) != (data_cfg.target_normalisation, data_cfg.rho):
+        raise ValueError(
+            f"{path.name} has target_normalisation={saved.target_normalisation!r}, rho={saved.rho} "
+            f"but config.json has {data_cfg.target_normalisation!r}, rho={data_cfg.rho}"
+        )
+
+
 @torch.no_grad()
 def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConfig) -> dict:
     "Two passes: field scale, then the errors themselves."
     acc = RelativeErrorAccumulator(scalers.target_columns, cfg)
     for batch in loader:
-        acc.update_scale(scalers.target.inverse_transform(batch.y.to(DEVICE)))
+        acc.update_scale(targets_to_physical(batch.y.to(DEVICE), batch, scalers))
     acc.lock_scale()
 
     for batch in loader:
@@ -79,8 +96,8 @@ def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConf
         pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
         # both sides denormalized
         acc.update(
-            scalers.target.inverse_transform(pred),
-            scalers.target.inverse_transform(batch.y),
+            targets_to_physical(pred, batch, scalers),
+            targets_to_physical(batch.y, batch, scalers),
         )
     return acc.result()
 
@@ -94,8 +111,8 @@ def nmape(model, loader, scalers: ScalerBundle) -> dict:
     for batch in loader:
         batch = batch.to(DEVICE)
         pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
-        y_pred = scalers.target.inverse_transform(pred)
-        y_true = scalers.target.inverse_transform(batch.y)
+        y_pred = targets_to_physical(pred, batch, scalers)
+        y_true = targets_to_physical(batch.y, batch, scalers)
         scalars_phys = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())
 
         # one graph at a time, since the reference differs per case
@@ -121,8 +138,8 @@ def export_fields(model, dataset, scalers: ScalerBundle, n_cases: int) -> None:
         pred = model(batch.x, batch.edge_index, batch.scalars, None)
 
         xy = scalers.node.inverse_transform(batch.x.cpu().numpy())[:, :2]
-        y_pred = scalers.target.inverse_transform(pred).cpu().numpy()
-        y_true = scalers.target.inverse_transform(batch.y).cpu().numpy()
+        y_pred = targets_to_physical(pred, batch, scalers).cpu().numpy()
+        y_true = targets_to_physical(batch.y, batch, scalers).cpu().numpy()
         scalars_phys = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())[0]
 
         out = EXPORT_DIR / f"dp{dp_id}.npz"
@@ -150,8 +167,8 @@ def export_parity(model, loader, scalers: ScalerBundle, path: Path, stride: int)
     for batch in loader:
         batch = batch.to(DEVICE)
         pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
-        p = scalers.target.inverse_transform(pred).cpu().numpy()[::stride]
-        t = scalers.target.inverse_transform(batch.y).cpu().numpy()[::stride]
+        p = targets_to_physical(pred, batch, scalers).cpu().numpy()[::stride]
+        t = targets_to_physical(batch.y, batch, scalers).cpu().numpy()[::stride]
         s = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())
 
         preds.append(p.astype(np.float32))

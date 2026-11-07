@@ -10,7 +10,8 @@ import torch
 from scipy.spatial import cKDTree
 from torch_geometric.loader import DataLoader
 
-from data import CropBox, DataConfig, build_splits
+from data import CropBox, DataConfig, build_splits, targets_to_physical
+from evaluate import check_scalers
 from model import GCNSurrogate, GCNSurrogateConfig
 
 # settings
@@ -142,7 +143,11 @@ def load_run() -> tuple[GCNSurrogate, DataConfig]:
         cache_dir = d["cache_dir"],
         split_fractions = tuple(d["split_fractions"]),
         split_seed = d["split_seed"],
+        # the run's own setting, not train.py's. Older runs were not normalised
+        target_normalisation = d.get("target_normalisation", "none"),
+        rho = d.get("rho", 1025.0),
     )
+    check_scalers(data_cfg, RUN_DIR)
     model = GCNSurrogate(GCNSurrogateConfig(**saved["model"])).to(DEVICE)
     ckpt = torch.load(RUN_DIR / "best.pt", map_location = DEVICE)
     model.load_state_dict(ckpt["model_state"])
@@ -171,8 +176,8 @@ def main() -> None:
 
         # everything back to physical units
         xy = scalers.node.inverse_transform(batch.x.cpu().numpy())[:, :2]
-        p_pred = scalers.target.inverse_transform(pred).cpu().numpy()[:, i_pressure]
-        p_true = scalers.target.inverse_transform(batch.y).cpu().numpy()[:, i_pressure]
+        p_pred = targets_to_physical(pred, batch, scalers).cpu().numpy()[:, i_pressure]
+        p_true = targets_to_physical(batch.y, batch, scalers).cpu().numpy()[:, i_pressure]
         s = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())[0]
 
         outline = foil_outline(float(s[i_m]), float(s[i_p]), float(s[i_t]),

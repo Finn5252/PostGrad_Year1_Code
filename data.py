@@ -17,6 +17,7 @@ from scipy.spatial import cKDTree
 from torch_geometric.data import Data
 
 MIN_NODES_AFTER_CROP = 16   # a case with fewer than this inside the box is an error
+TARGET_NORMALISATIONS = ("none", "freestream")
 
 # configuration
 
@@ -48,6 +49,10 @@ class DataConfig:
     # KNN graph with gaussian weights, used by the loss only. None leaves it out
     reg_k: Optional[int] = None
 
+    # "freestream": pressure as Cp = p / (0.5 * rho * V_in^2) and velocity as V / V_in, before min-max scaling
+    target_normalisation: str = "none"
+    rho: float = 1025.0 # working fluid density for Cp
+
     split_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1)
     split_seed: int = 0
 
@@ -58,6 +63,10 @@ class DataConfig:
             raise ValueError("knn_k must be >=1")
         if self.reg_k is not None and self.reg_k < 1:
             raise ValueError("reg_k must be >=1, or None to disable the regularization graph")
+        if self.target_normalisation not in TARGET_NORMALISATIONS:
+            raise ValueError(
+                f"target_normalisation must be one of {TARGET_NORMALISATIONS}, got {self.target_normalisation!r}"
+            )
         # cropping reads x and y out of the node matrix, so they have to be in it
         for name in (self.x_column, self.y_column):
             if name not in self.node_columns:
@@ -151,6 +160,8 @@ class ScalerBundle:
     node_columns: list[str] = field(default_factory = list)
     target_columns: list[str] = field(default_factory = list)
     scalar_columns: list[str] = field(default_factory = list)
+    target_normalisation: str = "none"
+    rho: float = 1025.0
 
     def save(self, path: str | Path) -> None:
         # Saved alongside every checkpoint
@@ -165,6 +176,8 @@ class ScalerBundle:
                 "node_columns": self.node_columns,
                 "target_columns": self.target_columns,
                 "scalar_columns": self.scalar_columns,
+                "target_normalisation": self.target_normalisation,
+                "rho": self.rho,
                 },
                 indent = 2,
             )
@@ -180,7 +193,41 @@ class ScalerBundle:
             node_columns = d["node_columns"],
             target_columns = d["target_columns"],
             scalar_columns = d["scalar_columns"],
+            # runs saved before the setting existed were not normalised
+            target_normalisation = d.get("target_normalisation", "none"),
+            rho = d.get("rho", 1025.0),
         )
+
+# freestream normalisation
+
+def _freestream_reference(v_in, target_columns: Sequence[str], rho: float, like = None):
+    "Per-field reference, 0.5 * rho * V_in^2 for pressure and V_in for velocity, as an (N, d) array or tensor"
+    if isinstance(like, torch.Tensor):
+        # same device and dtype as the values it scales, so it also works on the GPU
+        v = torch.as_tensor(v_in, dtype = like.dtype, device = like.device).reshape(-1, 1)
+        cat = lambda cols: torch.cat(cols, dim = 1)
+    else:
+        v = np.asarray(v_in, dtype = np.float64).reshape(-1, 1)
+        cat = lambda cols: np.concatenate(cols, axis = 1)
+    lookup = {
+        "static_pressure": 0.5 * rho * v**2,
+        "velocity_magnitude": v,
+    }
+    missing = [n for n in target_columns if n not in lookup]
+    if missing:
+        raise KeyError(f"no freestream reference defined for field(s) {missing}")
+    return cat([lookup[n] for n in target_columns])
+
+def targets_to_physical(z, batch, scalers: ScalerBundle):
+    "Scaled predictions or targets back to Pa and m/s, for either normalisation mode"
+    y = scalers.target.inverse_transform(z)
+    if scalers.target_normalisation == "none":
+        return y
+    # one V_in per graph, expanded to one per node. batch.batch is None for a single Data
+    v_in = batch.v_in
+    if getattr(batch, "batch", None) is not None:
+        v_in = v_in.to(batch.batch.device)[batch.batch]
+    return y * _freestream_reference(v_in, scalers.target_columns, scalers.rho, like = y)
 
 #HDF5 access
 
@@ -247,6 +294,11 @@ class CaseStore:
         self.x_pos = list(cfg.node_columns).index(cfg.x_column)
         self.y_pos = list(cfg.node_columns).index(cfg.y_column)
 
+        # V_in is read from the file's own columns, so it is there even if not a model input
+        if "V_in" not in self.available_scalar_columns:
+            raise KeyError(f"scalar column 'V_in' not found in the file. Available: {self.available_scalar_columns}")
+        self.v_in_idx = self.available_scalar_columns.index("V_in")
+
         self.n_cases = len(self.node_offsets) - 1
         if self.scalars_raw.shape[0] != self.n_cases:
             raise ValueError(
@@ -297,6 +349,16 @@ class CaseStore:
             # same boolean applied to both, therefore nodes and targets stay aligned
             nodes, targets = nodes[keep], targets[keep]
         return nodes, targets, scalars, dp_id
+
+    def v_in(self, i: int) -> float:
+        "Raw (unscaled) inlet velocity of case i"
+        return float(self.scalars_raw[i, self.v_in_idx])
+
+def normalise_targets(targets: np.ndarray, v_in: float, cfg: DataConfig) -> np.ndarray:
+    "Raw targets to the configured nondimensional form, before min-max scaling"
+    if cfg.target_normalisation == "none":
+        return targets
+    return targets / _freestream_reference(v_in, cfg.target_columns, cfg.rho)
 
 # graph construction and caching
 
@@ -491,6 +553,9 @@ class GraphDataset(torch.utils.data.Dataset):
                 f"cached graph for case {i} references node {int(edge_index.max())} but the cropped case has {nodes.shape[0]} nodes -- the cache is stale for this crop configuration"
             )
 
+        v_in = self.store.v_in(i)
+        targets = normalise_targets(targets, v_in, self.store.cfg)
+
         data = Data(
             x = torch.from_numpy(self.scalers.node.transform(nodes)),
             edge_index = torch.from_numpy(np.ascontiguousarray(edge_index)),
@@ -501,6 +566,8 @@ class GraphDataset(torch.utils.data.Dataset):
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
         data.case_id = torch.tensor([i], dtype=torch.long)
+        # raw V_in, for converting back to physical units. No "index" in the name, or PyG offsets it when batching
+        data.v_in = torch.tensor([v_in], dtype=torch.float64)
 
         if self.reg_cache is not None:
             pairs, w = self.reg_cache[i]
@@ -533,7 +600,8 @@ def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig)
     for i in train_indices:
         nodes, targets, scalars, _ = store.cropped_case(int(i))
         node.partial_fit(nodes)
-        target.partial_fit(targets)
+        # fitted on the normalised targets, so the min-max scaling sits on top of Cp and V / V_in
+        target.partial_fit(normalise_targets(targets, store.v_in(int(i)), cfg))
         scalar_rows.append(scalars)
     scalar.partial_fit(np.stack(scalar_rows))
 
@@ -544,6 +612,8 @@ def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig)
         node_columns=list(cfg.node_columns),
         target_columns=list(cfg.target_columns),
         scalar_columns=list(cfg.scalar_columns),
+        target_normalisation=cfg.target_normalisation,
+        rho=cfg.rho,
     )
 
 def build_splits(
@@ -573,6 +643,7 @@ def build_splits(
         )
         if cfg.crop is not None:
             print(f"[data] crop box: {cfg.crop}")
+        print(f"[data] target normalisation: {cfg.target_normalisation}")
         print(
             "[data] target min/max (fitted on train, after crop): "
             + ", ".join(

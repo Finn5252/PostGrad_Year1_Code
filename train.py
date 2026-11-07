@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 from torch_geometric.loader import DataLoader
 
-from data import CropBox, DataConfig, ScalerBundle, build_splits
+from data import CropBox, DataConfig, ScalerBundle, build_splits, targets_to_physical
 from metrics import (MeanAccumulator, RelativeErrorAccumulator, RelativeErrorConfig)
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 from regularisation import REG_MODES, laplacian_penalty
@@ -29,6 +29,9 @@ OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine"
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
 KNN_K = 4 # k nearest neighbours for gcn
 CACHE_DIR = "cache" # KNN graphs
+
+TARGET_NORMALISATION = "none" # "none" or "freestream" (Cp and V / V_in, then min-max)
+RHO = 1025.0 # working fluid density for Cp
 
 EPOCHS = 1000
 BATCH_SIZE = 1 # number of batches during training
@@ -161,14 +164,14 @@ def evaluate_relative_errors(model, loader, scalers: ScalerBundle, device: str, 
 
     # pass 1 - field scale
     for batch in loader:
-        y_true = scalers.target.inverse_transform(batch.y.to(device))
+        y_true = targets_to_physical(batch.y.to(device), batch, scalers)
         acc.update_scale(y_true)
     acc.lock_scale()
 
     # pass 2 - errors, in Pa and m/s 
     for batch in loader:
         pred, batch = _forward(model, batch, device)
-        acc.update(scalers.target.inverse_transform(pred), scalers.target.inverse_transform(batch.y),)
+        acc.update(targets_to_physical(pred, batch, scalers), targets_to_physical(batch.y, batch, scalers),)
     return acc.result()
 
 # training
@@ -362,6 +365,8 @@ def main() -> dict:
         knn_k = KNN_K,
         reg_k = REG_K,
         cache_dir = CACHE_DIR,
+        target_normalisation = TARGET_NORMALISATION,
+        rho = RHO,
         split_seed = SEED,
     )
     model_cfg = GCNSurrogateConfig(
