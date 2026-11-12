@@ -16,7 +16,7 @@ from model import GCNSurrogate, GCNSurrogateConfig
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation")
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov")
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
 
 SPLIT = "test" # use test distribution 
@@ -46,7 +46,7 @@ def naca4_profile(m: float, p: float, t: float, n: int = N_PANELS) -> np.ndarray
                     + 0.2843 * x**3 - 0.1015 * x**4)
 
     if m == 0.0 or p == 0.0:
-        yc = np.zeros_like(x) # symmetric section: no camber line
+        yc = np.zeros_like(x) # symmetric section
         dyc = np.zeros_like(x)
     else:
         fore = x <= p
@@ -57,12 +57,12 @@ def naca4_profile(m: float, p: float, t: float, n: int = N_PANELS) -> np.ndarray
                        2 * m / p**2 * (p - x),
                        2 * m / (1 - p)**2 * (p - x))
 
-    # thickness added normal to the camber line, not vertically
+    # thickness added normal to the camber line
     theta = np.arctan(dyc)
     xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
     xl, yl = x + yt * np.sin(theta), yc - yt * np.cos(theta)
 
-    # lower surface reversed, so the two join into one closed loop
+    # lower surface reversed
     return np.concatenate([
         np.stack([xu, yu], axis = 1),
         np.stack([xl[::-1], yl[::-1]], axis = 1),
@@ -143,7 +143,6 @@ def load_run() -> tuple[GCNSurrogate, DataConfig]:
         cache_dir = d["cache_dir"],
         split_fractions = tuple(d["split_fractions"]),
         split_seed = d["split_seed"],
-        # the run's own setting, not train.py's. Older runs were not normalised
         target_normalisation = d.get("target_normalisation", "none"),
         rho = d.get("rho", 1025.0),
     )
