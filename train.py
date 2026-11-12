@@ -24,7 +24,7 @@ from regularisation import REG_MODES, laplacian_penalty
 #settings
 
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov"
 
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
@@ -35,7 +35,7 @@ TARGET_NORMALISATION = "freestream" # "none" or "freestream" (Cp and V / V_in, t
 RHO = 1025.0 # working fluid density for Cp
 
 EPOCHS = 1000
-BATCH_SIZE = 1 # number of batches during training
+BATCH_SIZE = 1 
 LR = 1e-3
 LR_SCHEDULE = "cosine" # "cosine" or "step"
 LR_MIN = 1e-5 # minimum cosine learning rate 
