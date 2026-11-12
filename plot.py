@@ -95,7 +95,7 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
     yt = 5.0 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 - 0.1015 * x**4)
 
     if m == 0.0 or p == 0.0:
-        yc = np.zeros_like(x) # symmetric section: no camber line
+        yc = np.zeros_like(x) #symmetric section
         dyc = np.zeros_like(x)
     else:
         fore = x <= p
@@ -106,12 +106,12 @@ def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
                        2 * m / p**2 * (p - x),
                        2 * m / (1 - p)**2 * (p - x))
 
-    # thickness added normal to the camber line, not vertically
+    # thickness added normal to the camber line
     theta = np.arctan(dyc)
     xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
     xl, yl = x + yt * np.sin(theta), yc - yt * np.cos(theta)
 
-    # lower surface reversed, so the two join into one closed loop
+    # lower surface reversed
     return np.concatenate([
         np.stack([xu, yu], axis = 1),
         np.stack([xl[::-1], yl[::-1]], axis = 1),
@@ -136,7 +136,7 @@ def foil_outline(case: dict) -> np.ndarray:
 
 def draw_foil(ax, case: dict) -> None:
     xy = foil_outline(case)
-    # zorder 5 puts it over the contours
+    # z order 5 puts it over the contours
     ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k",
             linewidth = 0.8, zorder = 5)
 
@@ -206,8 +206,8 @@ def plot_error(case: dict, field_index: int) -> None:
     # red is over-prediction, blue under
     cf = ax.contourf(XI, YI, ZD, levels = np.linspace(-span, span, 41),
                      cmap = "RdBu_r", extend = "both")
-    ax.set_title(f"Predicted - actual   NMAPE = {nmape:.3f}%   "
-                 f"worst node = {worst:.2f}%")
+    #ax.set_title(f"Predicted - actual   NMAPE = {nmape:.3f}%   "
+                 #f"worst node = {worst:.2f}%")
     if DRAW_FOIL:
         draw_foil(ax, case)
     fig.colorbar(cf, ax = ax, label = f"difference [{unit}]" if unit else "difference")
@@ -264,8 +264,8 @@ def plot_parity() -> None:
         ax[k].legend(loc = "upper left", fontsize = 8)
         fig.colorbar(sc, ax = ax[k], label = "maximum camber, m")
 
-    fig.suptitle(f"Parity -- {n_cases} cases, {pred.shape[0]:,} points per field "
-                 f"(every {stride}th node)", fontsize = 10)
+    #fig.suptitle(f"Parity -- {n_cases} cases, {pred.shape[0]:,} points per field "
+                 #f"(every {stride}th node)", fontsize = 10)
     fig.tight_layout()
     out = FIG_DIR / "parity.png"
     fig.savefig(out, dpi = DPI, bbox_inches = "tight")
@@ -306,11 +306,11 @@ def _force_panel(ax, true, pred, v_in, label, symbol, band):
     ax.set_aspect("equal", adjustable="box")
     ax.grid(True, alpha=0.2)
     ax.legend(loc="upper left", fontsize=8)
-    ax.set_title(
-        f"{label}\nmean |error| = {mean_abs:.5f} ({rel:.2f}%), "
-        f"bias = {bias:+.5f}",
-        fontsize=10
-    )
+    #ax.set_title(
+        #f"{label}\nmean |error| = {mean_abs:.5f} ({rel:.2f}%), "
+        #f"bias = {bias:+.5f}",
+        #fontsize=10
+    #)
     return sc, rel
 
 
@@ -345,11 +345,11 @@ def plot_force_parity() -> None:
     fig.colorbar(
         sc, ax=ax, label="inlet velocity [m/s]", fraction=0.025
     )
-    fig.suptitle(
-        f"Integrated forces -- {len(rows)} cases. "
-        "Pressure drag excludes the viscous component.",
-        fontsize=10
-    )
+    #fig.suptitle(
+        #f"Integrated forces -- {len(rows)} cases. "
+        #"Pressure drag excludes the viscous component.",
+        #fontsize=10
+    #)
 
     out = FIG_DIR / "force_parity.png"
     fig.savefig(out, dpi=DPI, bbox_inches="tight")
