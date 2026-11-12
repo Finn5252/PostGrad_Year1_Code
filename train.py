@@ -54,10 +54,10 @@ REG_LAMBDA = 0
 REG_MODE = "error" # "error" penalises roughness of prediction - target
 
 # pressure drag loss
-DRAG_WEIGHTING = "fixed" # "fixed", "cov" , or None 
+DRAG_WEIGHTING = "cov" # "fixed", "cov" , or None 
 DRAG_LAMBDA = 1.0 # fixed mode
-FIELD_LOSS_REF = 1e-5 # typical field loss
-DRAG_LOSS_REF = 1e-3 # typical drag error
+FIELD_LOSS_REF = 4.7e-6 # typical field loss
+DRAG_LOSS_REF = 2e-4 # typical drag error
 COV_WINDOW = None # optimiser steps averaged into each CoV observation; None = one epoch
 COV_WARMUP = None # optimiser steps at equal weights before CoV takes over; None = two windows
 
