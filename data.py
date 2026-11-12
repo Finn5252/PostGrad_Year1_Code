@@ -8,13 +8,16 @@ import shutil
 
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
 
 import h5py
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
 from torch_geometric.data import Data
+
+if TYPE_CHECKING:
+    from drag import PanelCache
 
 MIN_NODES_AFTER_CROP = 16   # a case with fewer than this inside the box is an error
 TARGET_NORMALISATIONS = ("none", "freestream")
@@ -533,12 +536,15 @@ class GraphDataset(torch.utils.data.Dataset):
             indices: Sequence[int],
             scalers: ScalerBundle,
             reg_cache: Optional[RegGraphCache] = None,
+            panel_cache: Optional[PanelCache] = None,
     ) -> None:
         self.store = store
         self.cache = cache
         self.indices = list(indices)
         self.scalers = scalers
         self.reg_cache = reg_cache
+        # set by train.py when the drag loss is on
+        self.panel_cache = panel_cache
 
     def __len__(self) -> int:
         return len(self.indices)
@@ -566,7 +572,7 @@ class GraphDataset(torch.utils.data.Dataset):
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
         data.case_id = torch.tensor([i], dtype=torch.long)
-        # raw V_in, for converting back to physical units. No "index" in the name, or PyG offsets it when batching
+        # raw V_in, for converting back to physical units. 
         data.v_in = torch.tensor([v_in], dtype=torch.float64)
 
         if self.reg_cache is not None:
@@ -578,6 +584,16 @@ class GraphDataset(torch.utils.data.Dataset):
                 )
             data.reg_edge_index = torch.from_numpy(np.ascontiguousarray(pairs.T, dtype = np.int64))
             data.reg_edge_weight = torch.from_numpy(np.array(w, dtype = np.float32))
+
+        if self.panel_cache is not None:
+            cell, nx_ds = self.panel_cache[i]
+            if cell.size and int(cell.max()) >= nodes.shape[0]:
+                raise RuntimeError(
+                    f"cached surface panels for case {i} reference node {int(cell.max())} "
+                    f"but the cropped case has {nodes.shape[0]} nodes -- the cache is stale"
+                )
+            data.panel_index = torch.from_numpy(np.ascontiguousarray(cell, dtype = np.int64))
+            data.panel_nx_ds = torch.from_numpy(np.ascontiguousarray(nx_ds, dtype = np.float64))
         return data
 
 def _split_indices(
@@ -600,7 +616,7 @@ def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig)
     for i in train_indices:
         nodes, targets, scalars, _ = store.cropped_case(int(i))
         node.partial_fit(nodes)
-        # fitted on the normalised targets, so the min-max scaling sits on top of Cp and V / V_in
+        # fitted on the normalised targets
         target.partial_fit(normalise_targets(targets, store.v_in(int(i)), cfg))
         scalar_rows.append(scalars)
     scalar.partial_fit(np.stack(scalar_rows))
