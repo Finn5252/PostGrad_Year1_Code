@@ -20,7 +20,7 @@ from forces import (
 
 DRAG_MODES = (None, "fixed", "cov")
 GEOMETRY_COLUMNS = ("m", "p", "t", "AoA") # foil_outline's arguments, in order
-MATCH_RADIUS = 50 * QUERY_OFFSET # as in forces.integrate
+MATCH_RADIUS = 50 * QUERY_OFFSET 
 PANEL_VERSION = "naca4-panels-v1"
 
 
@@ -37,7 +37,6 @@ class PanelCache:
         self.geometry_pos = [names.index(n) for n in GEOMETRY_COLUMNS]
 
         payload = {
-            # the KNN key already carries the store, crop and k
             "graphs": cfg.cache_key(store.fingerprint),
             "n_panels": N_PANELS,
             "query_offset": QUERY_OFFSET,
@@ -138,7 +137,6 @@ def pressure_drag_coefficients(
 
 class DragLoss:
     "Absolute error in pressure drag coefficient, per case, averaged over the cases in the batch"
-
     def __init__(self, scalers: ScalerBundle) -> None:
         # Cp is made with the scalers' rho and Cdp with forces.py's, so the two must agree
         if scalers.target_normalisation != "none" and scalers.rho != RHO:
@@ -197,7 +195,6 @@ class CoVWeighting:
         self.M_l = np.zeros(2)
 
     def alphas(self) -> tuple[float, float]:
-        "The paper's weights, summing to 1"
         if self.step < self.warmup or self.n < 2:
             return (0.5, 0.5)
         c = np.sqrt(self.M_l) / self.mean_l
