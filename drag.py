@@ -1,0 +1,235 @@
+# libraries
+
+from __future__ import annotations
+
+import hashlib
+import json
+
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+import torch
+from scipy.spatial import cKDTree
+from torch import Tensor
+
+from data import CaseStore, DataConfig, ScalerBundle, targets_to_physical
+from forces import (
+    CHORD, LEADING_EDGE_X, LEADING_EDGE_Y, N_PANELS, QUERY_OFFSET, RHO, foil_outline, panels,
+)
+
+DRAG_MODES = (None, "fixed", "cov")
+GEOMETRY_COLUMNS = ("m", "p", "t", "AoA") # foil_outline's arguments, in order
+MATCH_RADIUS = 50 * QUERY_OFFSET # as in forces.integrate
+PANEL_VERSION = "naca4-panels-v1"
+
+
+# panel geometry
+
+class PanelCache:
+    "On-disk cache of the surface panels and the cell adjacent to each, keyed like GraphCache"
+
+    def __init__(self, cfg: DataConfig, store: CaseStore) -> None:
+        names = list(cfg.scalar_columns)
+        missing = [n for n in GEOMETRY_COLUMNS if n not in names]
+        if missing:
+            raise KeyError(f"the drag loss needs scalar columns {missing} to rebuild the foil")
+        self.geometry_pos = [names.index(n) for n in GEOMETRY_COLUMNS]
+
+        payload = {
+            # the KNN key already carries the store, crop and k
+            "graphs": cfg.cache_key(store.fingerprint),
+            "n_panels": N_PANELS,
+            "query_offset": QUERY_OFFSET,
+            "match_radius": MATCH_RADIUS,
+            "leading_edge": [LEADING_EDGE_X, LEADING_EDGE_Y],
+            "version": PANEL_VERSION,
+        }
+        blob = json.dumps(payload, sort_keys = True).encode()
+        self.key = hashlib.sha256(blob).hexdigest()[:16]
+        self.path = Path(cfg.cache_dir) / f"panels_{self.key}.npz"
+        self.store = store
+        self._arrays: Optional[dict[str, np.ndarray]] = None
+
+    def build_or_load(self, verbose: bool = True) -> None:
+        if self.path.exists():
+            with np.load(self.path) as z:
+                self._arrays = {name: z[name] for name in z.files}
+            if verbose:
+                print(f"[data] loaded cached surface panels from {self.path}")
+        else:
+            self._build(verbose)
+
+        if len(self._arrays["offsets"]) != self.store.n_cases + 1:
+            raise RuntimeError(f"panel cache {self.path} does not match the store; delete it to rebuild")
+
+        frac = self.matched_fraction
+        if verbose:
+            worst = int(frac.argmin())
+            print(
+                f"[data] panels matched to a cell: {frac.mean():.2%} "
+                f"(worst case {frac[worst]:.2%}, dp_id={int(self.store.dp_ids[worst])})"
+            )
+        empty = np.flatnonzero(frac == 0)
+        if empty.size:
+            raise RuntimeError(
+                f"{empty.size} case(s) have no panel matched to a cell, first is case {int(empty[0])} "
+                f"-- the foil geometry and the mesh do not line up"
+            )
+
+    def _build(self, verbose: bool) -> None:
+        if verbose:
+            print(f"[data] building surface panels ({N_PANELS} points per surface) -> {self.path}")
+        parts = {name: [] for name in ("mid", "normal", "ds", "cell", "matched")}
+        offsets = [0]
+        for i in range(self.store.n_cases):
+            nodes, _, scalars, _ = self.store.cropped_case(i)
+            xy = nodes[:, [self.store.x_pos, self.store.y_pos]]
+            outline = foil_outline(*(float(scalars[j]) for j in self.geometry_pos))
+            mid, normal, ds = panels(outline)
+            dist, cell = cKDTree(xy).query(mid + QUERY_OFFSET * normal)
+            for name, value in zip(parts, (mid, normal, ds, cell, dist < MATCH_RADIUS)):
+                parts[name].append(value)
+            offsets.append(offsets[-1] + len(ds))
+            if verbose and (i + 1) % 100 == 0:
+                print(f"[data]   {i + 1}/{self.store.n_cases} cases")
+
+        arrays = {name: np.concatenate(values) for name, values in parts.items()}
+        arrays["cell"] = arrays["cell"].astype(np.int64)
+        arrays["offsets"] = np.asarray(offsets, dtype = np.int64)
+        self.path.parent.mkdir(parents = True, exist_ok = True)
+        np.savez_compressed(self.path, **arrays)
+        self._arrays = arrays
+
+    @property
+    def matched_fraction(self) -> np.ndarray:
+        "Fraction of each case's panels that found an adjacent cell"
+        offsets = self._arrays["offsets"]
+        hits = np.add.reduceat(self._arrays["matched"].astype(np.int64), offsets[:-1])
+        return hits / np.diff(offsets)
+
+    def __getitem__(self, i: int) -> tuple[np.ndarray, np.ndarray]:
+        "Adjacent cell and n_x * ds of every matched panel of case i"
+        if self._arrays is None:
+            self.build_or_load()
+        a, b = int(self._arrays["offsets"][i]), int(self._arrays["offsets"][i + 1])
+        keep = self._arrays["matched"][a:b]
+        nx_ds = self._arrays["normal"][a:b, 0] * self._arrays["ds"][a:b]
+        return self._arrays["cell"][a:b][keep], nx_ds[keep]
+
+
+# force integration
+
+def pressure_drag_coefficients(
+        pressure: Tensor, # (N,) Pa, every node in the batch
+        panel_index: Tensor, # (P,) adjacent node of each panel, already offset into the batch
+        panel_nx_ds: Tensor, # (P,) outward normal x component times panel length
+        node_batch: Tensor, # (N,) which case each node belongs to
+        v_in: Tensor, # (B,) inlet velocity per case
+        n_graphs: int,
+) -> Tensor:
+    "Cdp per case: F_x = -sum p n_x ds, as in forces.integrate, over 0.5 rho V^2 c"
+    contrib = -pressure[panel_index] * panel_nx_ds
+    # the case comes from the node a panel points at, so a wrong offset puts it in the wrong case
+    case = node_batch[panel_index]
+    drag = contrib.new_zeros(n_graphs).index_add(0, case, contrib)
+    return drag / (0.5 * RHO * v_in**2 * CHORD)
+
+
+class DragLoss:
+    "Absolute error in pressure drag coefficient, per case, averaged over the cases in the batch"
+
+    def __init__(self, scalers: ScalerBundle) -> None:
+        # Cp is made with the scalers' rho and Cdp with forces.py's, so the two must agree
+        if scalers.target_normalisation != "none" and scalers.rho != RHO:
+            raise ValueError(f"scalers use rho={scalers.rho} but forces.py uses RHO={RHO}")
+        self.scalers = scalers
+        self.i_pressure = list(scalers.target_columns).index("static_pressure")
+
+    def coefficients(self, z: Tensor, batch) -> Tensor:
+        "Cdp per case from scaled targets or predictions, shape (num_graphs,)"
+        # float64 from here on: the drag is a small difference of large panel forces
+        pressure = targets_to_physical(z.double(), batch, self.scalers)[:, self.i_pressure]
+        v_in = batch.v_in.to(pressure) # raw, one per case
+        return pressure_drag_coefficients(
+            pressure, batch.panel_index, batch.panel_nx_ds, batch.batch, v_in, int(batch.num_graphs)
+        )
+
+    def __call__(self, pred: Tensor, batch) -> Tensor:
+        cd_pred = self.coefficients(pred, batch)
+        with torch.no_grad():
+            cd_true = self.coefficients(batch.y, batch)
+        return (cd_pred - cd_true).abs().mean().to(pred.dtype)
+
+
+# weighting of the field and drag losses
+
+class FixedWeighting:
+    "Constant coefficients (field, drag) on the raw losses"
+
+    def __init__(self, reference: tuple[float, float]) -> None:
+        self.reference = reference
+
+    def weights(self) -> tuple[float, float]:
+        return self.reference
+
+    def observe(self, field: float, drag: float) -> None:
+        pass
+
+    def summary(self) -> dict:
+        return {"mode": "fixed", "weights": list(self.reference)}
+
+
+class CoVWeighting:
+
+    def __init__(
+            self, reference: tuple[float, float], drag_scale: float, window: int, warmup: int,
+    ) -> None:
+        self.reference = reference # used for the logged loss and for model selection only
+        self.drag_scale = drag_scale # field_loss_ref / drag_loss_ref
+        self.window = window
+        self.warmup = warmup
+        self.step = 0
+        self.smoothed = np.zeros(2)
+        self.n = 0 # observations fed to the CoV statistics
+        self.mean_L = np.zeros(2)
+        self.mean_l = np.zeros(2)
+        self.M_l = np.zeros(2)
+
+    def alphas(self) -> tuple[float, float]:
+        "The paper's weights, summing to 1"
+        if self.step < self.warmup or self.n < 2:
+            return (0.5, 0.5)
+        c = np.sqrt(self.M_l) / self.mean_l
+        if not np.all(np.isfinite(c)) or c.sum() <= 0:
+            return (0.5, 0.5)
+        alpha = c / c.sum()
+        return (float(alpha[0]), float(alpha[1]))
+
+    def weights(self) -> tuple[float, float]:
+        "Coefficients on the raw losses"
+        a_field, a_drag = self.alphas()
+        return (a_field, a_drag * self.drag_scale)
+
+    def observe(self, field: float, drag: float) -> None:
+        self.step += 1
+        self.smoothed += (np.array([field, drag]) - self.smoothed) / min(self.step, self.window)
+        # statistics start once the window has filled, so early single-case values never enter them
+        if self.step < self.window:
+            return
+        self.n += 1
+        t = self.n
+        ratio = self.smoothed / self.mean_L if t > 1 else np.ones(2) # eq. 3
+        self.mean_L += (self.smoothed - self.mean_L) / t # eq. 5
+        previous = self.mean_l.copy()
+        self.mean_l += (ratio - self.mean_l) / t # eq. 6
+        self.M_l = (1 - 1 / t) * self.M_l + (ratio - previous) * (ratio - self.mean_l) / t # eq. 7
+
+    def summary(self) -> dict:
+        return {
+            "mode": "cov",
+            "drag_scale": self.drag_scale,
+            "window_steps": self.window,
+            "warmup_steps": self.warmup,
+            "reference_weights": list(self.reference),
+        }
