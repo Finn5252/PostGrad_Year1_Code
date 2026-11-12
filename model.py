@@ -8,7 +8,9 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch_geometric.nn import GCNConv, global_mean_pool
+from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
+
+CONV_TYPES = ("gcn", "gat")
 
 @dataclass
 class GCNSurrogateConfig:
@@ -19,11 +21,27 @@ class GCNSurrogateConfig:
     hidden: int = 256 # neurons per layer
     n_shared_blocks: int = 4 # number of shared layer blocks
     n_gcn_blocks: int = 3 # number of gcn blocks with the exception of the final output convolution
+    conv: str = "gcn" # "gcn" (spectral convolution) or "gat" (graph attention)
+    heads: int = 4 # attention heads, gat only
     def __post_init__(self) -> None:
         if self.n_shared_blocks < 1:
             raise ValueError("n_shared_blocks must be >=1")
         if self.n_gcn_blocks < 1:
             raise ValueError("n_gcn_blocks must be >=1")
+        if self.conv not in CONV_TYPES:
+            raise ValueError(f"conv must be one of {CONV_TYPES}, got {self.conv!r}")
+        if self.conv == "gat" and self.hidden % self.heads != 0:
+            raise ValueError(f"hidden ({self.hidden}) must be divisible by heads ({self.heads})")
+
+def make_conv(in_dim: int, out_dim: int, cfg: GCNSurrogateConfig, last: bool = False) -> nn.Module:
+    "A graph convolution of the configured type, out_dim wide either way"
+    if cfg.conv == "gcn":
+        return GCNConv(in_dim, out_dim, add_self_loops = False)
+    if last:
+        # output layer: heads averaged, so the width stays n_outputs
+        return GATConv(in_dim, out_dim, heads = cfg.heads, concat = False, add_self_loops = False)
+    # each head gives out_dim / heads features, concatenated back to out_dim
+    return GATConv(in_dim, out_dim // cfg.heads, heads = cfg.heads, add_self_loops = False)
 
 class SharedBlock(nn.Module):
     """shared GCN/FC block:
@@ -38,13 +56,14 @@ class SharedBlock(nn.Module):
             scalar_in: int,
             hidden: int,
             skip_in: Optional [int],
+            cfg: GCNSurrogateConfig,
     ) -> None:
         super().__init__()
         self.graph_in = graph_in
         self.scalar_in = scalar_in
         self.hidden = hidden
 
-        self.conv = GCNConv(graph_in, hidden, add_self_loops = False)
+        self.conv = make_conv(graph_in, hidden, cfg)
         self.fc = nn.Linear(scalar_in, hidden)
 
         # skip_in is none only for block 1, which has no preceding block to take a shortcut from.
@@ -108,11 +127,11 @@ class SharedBlock(nn.Module):
 class GCNBlock(nn.Module):
     "Residual GCN block:"
 
-    def __init__(self, in_dim: int, hidden: int) -> None:
+    def __init__(self, in_dim: int, hidden: int, cfg: GCNSurrogateConfig) -> None:
         super().__init__()
         self.in_dim = in_dim
         self.hidden = hidden
-        self.conv = GCNConv(in_dim, hidden, add_self_loops = False)
+        self.conv = make_conv(in_dim, hidden, cfg)
         self.act = nn.ReLU()
 
     def forward(
@@ -147,18 +166,18 @@ class GCNSurrogate(nn.Module):
         for i in range(cfg.n_shared_blocks):
             if i == 0:
                 # Raw inputs, no shortcut since there is no preceding block.
-                shared.append(SharedBlock(cfg.n_node_features, cfg.n_scalar_features, H, None))
+                shared.append(SharedBlock(cfg.n_node_features, cfg.n_scalar_features, H, None, cfg))
             else:
                 # 2 * H in, because the previous block concatenated the broadcast case signal onto its mesh signal.
-                shared.append(SharedBlock(2 * H, H, H, H))
+                shared.append(SharedBlock(2 * H, H, H, H, cfg))
         self.shared_blocks = nn.ModuleList(shared)
 
         # The first standard block also uses the concatenated signal, so it takes 2 * H; the rest are H wide.
-        blocks = [GCNBlock(2 * H if j == 0 else H, H) for j in range(cfg.n_gcn_blocks)]
+        blocks = [GCNBlock(2 * H if j == 0 else H, H, cfg) for j in range(cfg.n_gcn_blocks)]
         self.gcn_blocks = nn.ModuleList(blocks)
 
         # output convolution 
-        self.out_conv = GCNConv(H, cfg.n_outputs, add_self_loops = False)
+        self.out_conv = make_conv(H, cfg.n_outputs, cfg, last = True)
 
     def forward(
         self,
