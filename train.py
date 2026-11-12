@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch_geometric.loader import DataLoader
 
 from data import CropBox, DataConfig, ScalerBundle, build_splits, targets_to_physical
+from drag import DRAG_MODES, CoVWeighting, DragLoss, FixedWeighting, PanelCache
 from metrics import (MeanAccumulator, RelativeErrorAccumulator, RelativeErrorConfig)
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
 from regularisation import REG_MODES, laplacian_penalty
@@ -28,7 +29,7 @@ OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisat
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
 KNN_K = 4 # k nearest neighbours for gcn
-CACHE_DIR = "cache" # KNN graphs
+CACHE_DIR = "cache" # KNN graphs and surface panels
 
 TARGET_NORMALISATION = "freestream" # "none" or "freestream" (Cp and V / V_in, then min-max)
 RHO = 1025.0 # working fluid density for Cp
@@ -37,18 +38,28 @@ EPOCHS = 1000
 BATCH_SIZE = 1 # number of batches during training
 LR = 1e-3
 LR_SCHEDULE = "cosine" # "cosine" or "step"
-LR_MIN = 1e-5 # learning rate reached at the final epoch (cosine only)
-PATIENCE = 200  # how many epochs validation loss must see no improvement for before early stopping
+LR_MIN = 1e-5 # minimum cosine learning rate 
+PATIENCE = 200  # early stopping criteria: number of epochs without validation improvement
 SEED = 0 # for replicability
 
 HIDDEN = 256
 SHARED_BLOCKS = 4
 GCN_BLOCKS = 3 
+CONV = "gcn" # "gcn" or "gat"
+HEADS = 4 # attention heads, gat only
 
 # smoothness regularization
 REG_K = None # neighbours in the gaussian graph for the smoothing loss
 REG_LAMBDA = 0 
 REG_MODE = "error" # "error" penalises roughness of prediction - target
+
+# pressure drag loss
+DRAG_WEIGHTING = "fixed" # "fixed", "cov" , or None 
+DRAG_LAMBDA = 1.0 # fixed mode
+FIELD_LOSS_REF = 1e-5 # typical field loss
+DRAG_LOSS_REF = 1e-3 # typical drag error
+COV_WINDOW = None # optimiser steps averaged into each CoV observation; None = one epoch
+COV_WARMUP = None # optimiser steps at equal weights before CoV takes over; None = two windows
 
 ZERO_HANDLING = "mask"   
 ZERO_THRESHOLD = 1e-3
@@ -78,6 +89,13 @@ class TrainConfig:
     reg_lambda: float = REG_LAMBDA
     reg_mode: str = REG_MODE
 
+    drag_weighting: Optional[str] = DRAG_WEIGHTING
+    drag_lambda: float = DRAG_LAMBDA
+    field_loss_ref: float = FIELD_LOSS_REF
+    drag_loss_ref: float = DRAG_LOSS_REF
+    cov_window: Optional[int] = COV_WINDOW
+    cov_warmup: Optional[int] = COV_WARMUP
+
     seed: int = SEED
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     num_workers: int = 0
@@ -96,6 +114,16 @@ class TrainConfig:
             raise ValueError(f"reg_mode must be one of {REG_MODES}, got {self.reg_mode!r}")
         if self.lr_schedule not in ("cosine", "step"):
             raise ValueError(f"lr_schedule must be 'cosine' or 'step', got {self.lr_schedule!r}")
+        if self.drag_weighting not in DRAG_MODES:
+            raise ValueError(f"drag_weighting must be one of {DRAG_MODES}, got {self.drag_weighting!r}")
+        if self.drag_lambda < 0:
+            raise ValueError("drag_lambda must be >= 0")
+        if self.field_loss_ref <= 0 or self.drag_loss_ref <= 0:
+            raise ValueError("field_loss_ref and drag_loss_ref must be > 0")
+        if self.cov_window is not None and self.cov_window < 1:
+            raise ValueError("cov_window must be >= 1, or None for one epoch")
+        if self.cov_warmup is not None and self.cov_warmup < 0:
+            raise ValueError("cov_warmup must be >= 0, or None for two windows")
 
 def set_seed(seed: int) -> None:
     "Four separate generators, because each library keeps its own"
@@ -113,36 +141,57 @@ def _forward(model: GCNSurrogate, batch, device:str):
     pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
     return pred, batch
 
-def _losses(pred, batch, reg_lambda: float, reg_mode: str):
-    "Total loss, data term and smoothness term"
+def _losses(pred, batch, reg_lambda: float, reg_mode: str, drag_loss: Optional[DragLoss]):
+    "Data term, smoothness term and drag term; the last two are None when absent"
     data_loss = 0.5 * nn.functional.mse_loss(pred, batch.y)
-    if "reg_edge_index" not in batch:
-        return data_loss, data_loss, None
-    args = (pred, batch.y, batch.reg_edge_index, batch.reg_edge_weight, reg_mode)
-    if reg_lambda > 0:
-        reg = laplacian_penalty(*args)
-        return data_loss + reg_lambda * reg, data_loss, reg
-    # lambda = 0: the term is still measured
-    with torch.no_grad():
-        reg = laplacian_penalty(*args)
-    return data_loss, data_loss, reg
+    reg = None
+    if "reg_edge_index" in batch:
+        args = (pred, batch.y, batch.reg_edge_index, batch.reg_edge_weight, reg_mode)
+        if reg_lambda > 0:
+            reg = laplacian_penalty(*args)
+        else:
+            # lambda = 0: the term is still measured
+            with torch.no_grad():
+                reg = laplacian_penalty(*args)
+    drag = drag_loss(pred, batch) if drag_loss is not None else None
+    return data_loss, reg, drag
 
-def run_epoch(model, loader, device, reg_lambda: float, reg_mode: str, optimizer = None) -> dict:
-    "One complete pass over a dataset, returning the case-averaged total, data and smoothness terms."
+def _combine(data_loss, reg, drag, reg_lambda: float, weights: tuple[float, float]):
+    "w_field * data + reg_lambda * reg + w_drag * drag"
+    total = weights[0] * data_loss
+    if reg is not None and reg_lambda > 0:
+        total = total + reg_lambda * reg
+    if drag is not None:
+        total = total + weights[1] * drag
+    return total
+
+def run_epoch(
+        model, loader, device, reg_lambda: float, reg_mode: str, optimizer = None,
+        drag_loss: Optional[DragLoss] = None, weighting = None,
+) -> dict:
+    "One complete pass over a dataset, returning the case-averaged total, data, smoothness and drag terms."
     training = optimizer is not None
     model.train(training)
-    acc = {name: MeanAccumulator() for name in ("loss", "data", "reg")}
+    acc = {name: MeanAccumulator() for name in ("loss", "data", "reg", "drag", "w_field", "w_drag")}
     has_reg = False
+    # the logged loss always uses the reference weights, so under CoV it still means the same thing every epoch
+    reference = weighting.reference if weighting is not None else (1.0, 0.0)
     context = torch.enable_grad() if training else torch.no_grad()
     with context:
         for batch in loader:
             pred, batch = _forward(model, batch, device)
-            loss, data_loss, reg = _losses(pred, batch, reg_lambda, reg_mode)
+            data_loss, reg, drag = _losses(pred, batch, reg_lambda, reg_mode, drag_loss)
+            loss = _combine(data_loss, reg, drag, reg_lambda, reference)
             if training:
+                w = weighting.weights() if weighting is not None else reference
                 # clear the previous gradients, adjust weights
                 optimizer.zero_grad(set_to_none = True)
-                loss.backward()
+                _combine(data_loss, reg, drag, reg_lambda, w).backward()
                 optimizer.step()
+                if weighting is not None:
+                    weighting.observe(data_loss.item(), drag.item())
+                acc["w_field"].update(w[0])
+                acc["w_drag"].update(w[1])
             n_graphs = int(batch.num_graphs)
             # extracts the number only for storage efficiency
             acc["loss"].update(loss.item(), n = n_graphs)
@@ -150,11 +199,17 @@ def run_epoch(model, loader, device, reg_lambda: float, reg_mode: str, optimizer
             if reg is not None:
                 acc["reg"].update(reg.item(), n = n_graphs)
                 has_reg = True
-    return {
+            if drag is not None:
+                acc["drag"].update(drag.item(), n = n_graphs)
+    out = {
         "loss": acc["loss"].mean,
         "data": acc["data"].mean,
         "reg": acc["reg"].mean if has_reg else float("nan"),
+        "drag": acc["drag"].mean,
     }
+    if training:
+        out["w_field"], out["w_drag"] = acc["w_field"].mean, acc["w_drag"].mean
+    return out
 
 @torch.no_grad()
 def evaluate_relative_errors(model, loader, scalers: ScalerBundle, device: str, cfg: RelativeErrorConfig) -> dict:
@@ -198,9 +253,27 @@ def train(
     val_loader = DataLoader(val_ds, batch_size = train_cfg.batch_size)
     test_loader = DataLoader(test_ds, batch_size = train_cfg.batch_size)
 
+    drag_loss, weighting = None, None
+    if train_cfg.drag_weighting is not None:
+        panel_cache = PanelCache(data_cfg, store)
+        panel_cache.build_or_load()
+        for ds in (train_ds, val_ds, test_ds):
+            ds.panel_cache = panel_cache
+        drag_loss = DragLoss(scalers)
+        # each loss over its reference, all times field_loss_ref so the field term keeps its usual scale
+        reference = (1.0, train_cfg.drag_lambda * train_cfg.field_loss_ref / train_cfg.drag_loss_ref)
+        if train_cfg.drag_weighting == "fixed":
+            weighting = FixedWeighting(reference)
+        else:
+            window = train_cfg.cov_window or len(train_loader)
+            warmup = 2 * window if train_cfg.cov_warmup is None else train_cfg.cov_warmup
+            drag_scale = train_cfg.field_loss_ref / train_cfg.drag_loss_ref
+            weighting = CoVWeighting(reference, drag_scale, window, warmup)
+
     model = GCNSurrogate(model_cfg).to(device)
     print(f"[train] {count_parameters(model):,} trainable parameters on {device}")
     print(f"[train] smoothness regularization: lambda={lam}, mode={mode!r}, reg_k={data_cfg.reg_k}")
+    print(f"[train] drag term: {weighting.summary() if weighting is not None else 'off'}")
 
     optimizer = torch.optim.Adam(
         model.parameters(), 
@@ -225,6 +298,7 @@ def train(
                 "data": _jsonable(asdict(data_cfg)),
                 "model": _jsonable(asdict(model_cfg)),
                 "train": _jsonable(asdict(train_cfg)),
+                "drag": weighting.summary() if weighting is not None else None,
                 "n_parameters": count_parameters(model),
             },
             indent = 2,
@@ -238,11 +312,15 @@ def train(
     epochs_since_improvement = 0
     t0 = time.time()
 
-    # loss = data + lambda * reg
-    fieldnames = ["epoch", "lr"] + [
-        f"{split}_{part}" for split in ("train", "val", "test") for part in ("loss", "data", "reg")
-    ]
-    nan_row = {"loss": float("nan"), "data": float("nan"), "reg": float("nan")}
+    # loss = data + lambda * reg + reference drag weight * drag
+    splits = ("train", "val", "test")
+    fieldnames = (
+        ["epoch", "lr"]
+        + [f"{split}_{part}" for split in splits for part in ("loss", "data", "reg")]
+        + [f"{split}_drag" for split in splits]
+        + ["w_field", "w_drag"]
+    )
+    nan_row = {"loss": float("nan"), "data": float("nan"), "reg": float("nan"), "drag": float("nan")}
 
     with history_path.open("w", newline = "") as fh:
         writer = csv.DictWriter(fh, fieldnames = fieldnames)
@@ -250,16 +328,16 @@ def train(
 
         for epoch in range(1, train_cfg.epochs + 1):
             lr_now = optimizer.param_groups[0]["lr"]
-            tr = run_epoch(model, train_loader, device, lam, mode, optimizer)
-            va = run_epoch(model, val_loader, device, lam, mode)
+            tr = run_epoch(model, train_loader, device, lam, mode, optimizer, drag_loss, weighting)
+            va = run_epoch(model, val_loader, device, lam, mode, None, drag_loss, weighting)
             te = (
-                run_epoch(model, test_loader, device, lam, mode)
+                run_epoch(model, test_loader, device, lam, mode, None, drag_loss, weighting)
                 if train_cfg.log_test_each_epoch
                 else nan_row
             )
             scheduler.step()
 
-            row = {"epoch": epoch, "lr": lr_now}
+            row = {"epoch": epoch, "lr": lr_now, "w_field": tr.pop("w_field"), "w_drag": tr.pop("w_drag")}
             for split, res in (("train", tr), ("val", va), ("test", te)):
                 for part, value in res.items():
                     row[f"{split}_{part}"] = value
@@ -291,7 +369,8 @@ def train(
                 print(
                     f"[{epoch:>4}/{train_cfg.epochs}] lr={lr_now:.2e} "
                     f"train={tr['loss']:.6e} val={va['loss']:.6e} "
-                    f"(val data={va['data']:.3e} reg={va['reg']:.3e}) "
+                    f"(val data={va['data']:.3e} reg={va['reg']:.3e} drag={va['drag']:.3e}) "
+                    f"w=({row['w_field']:.3g}, {row['w_drag']:.3g}) "
                     f"best_val={best_val:.6e}@{best_epoch}"
                 )
 
@@ -314,9 +393,10 @@ def train(
         "wall_time_s": time.time() - t0,
         "n_parameters": count_parameters(model),
         "reg": {"lambda": lam, "mode": mode, "k": data_cfg.reg_k},
+        "drag": weighting.summary() if weighting is not None else None,
         "n_cases": {"train": len(train_ds), "val": len(val_ds), "test": len(test_ds)},
         "loss": {
-            split: run_epoch(model, loader, device, lam, mode)
+            split: run_epoch(model, loader, device, lam, mode, None, drag_loss, weighting)
             for split, loader in (
                 ("train", train_loader), ("val", val_loader), ("test", test_loader)
             )
@@ -336,7 +416,7 @@ def train(
     t = results["loss"]["test"]
     print(
         f"[train] final test (evaluated once): loss={t['loss']:.6e} "
-        f"data={t['data']:.6e} reg={t['reg']:.6e}"
+        f"data={t['data']:.6e} reg={t['reg']:.6e} drag={t['drag']:.6e}"
     )
     for split in ("train", "val", "test"):
         print(f"[train] relative errors ({split}):")
@@ -357,7 +437,8 @@ def _jsonable(obj):
         return [_jsonable(v) for v in obj]
     return obj
 
-def main() -> dict:
+def configs() -> tuple[DataConfig, GCNSurrogateConfig, TrainConfig]:
+    "The settings above as config objects; check_drag.py builds from the same ones"
     data_cfg = DataConfig(
         h5_path = H5_PATH,
         # CROP unpacks the four-tuple into four separate arguments
@@ -376,12 +457,17 @@ def main() -> dict:
         n_scalar_features = len(data_cfg.scalar_columns),
         n_node_features = len(data_cfg.node_columns),
         n_outputs = len(data_cfg.target_columns),
+        conv = CONV,
+        heads = HEADS,
     )
     train_cfg = TrainConfig(
         # early stopping wont trigger during smoke test
         early_stopping_patience = 10**9 if SMOKE else PATIENCE,
     )
-    return train(data_cfg, model_cfg, train_cfg)
+    return data_cfg, model_cfg, train_cfg
+
+def main() -> dict:
+    return train(*configs())
  
  
 if __name__ == "__main__":
