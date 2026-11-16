@@ -18,14 +18,9 @@ from forces import (
     CHORD, LEADING_EDGE_X, LEADING_EDGE_Y, N_PANELS, QUERY_OFFSET, RHO, foil_outline, panels,
 )
 
-<<<<<<< HEAD:surface.py
 SURFACE_LOSSES = (None, "drag", "cp") 
 WEIGHTING_MODES = ("fixed", "cov")
 GEOMETRY_COLUMNS = ("m", "p", "t", "AoA") 
-=======
-DRAG_MODES = (None, "fixed", "cov")
-GEOMETRY_COLUMNS = ("m", "p", "t", "AoA") # foil_outline's arguments, in order
->>>>>>> 3bb584b815ce0e882779d3b96bc78873f2fe0f3e:drag.py
 MATCH_RADIUS = 50 * QUERY_OFFSET 
 PANEL_VERSION = "naca4-panels-v1"
 
@@ -144,6 +139,7 @@ def pressure_drag_coefficients(
 
 class DragLoss:
     "Absolute error in pressure drag coefficient, per case, averaged over the cases in the batch"
+
     def __init__(self, scalers: ScalerBundle) -> None:
         if scalers.target_normalisation != "none" and scalers.rho != RHO:
             raise ValueError(f"scalers use rho={scalers.rho} but forces.py uses RHO={RHO}")
@@ -232,10 +228,7 @@ class CoVWeighting:
         self.M_l = np.zeros(2)
 
     def alphas(self) -> tuple[float, float]:
-<<<<<<< HEAD:surface.py
         "weights summing to 1"
-=======
->>>>>>> 3bb584b815ce0e882779d3b96bc78873f2fe0f3e:drag.py
         if self.step < self.warmup or self.n < 2:
             return (0.5, 0.5)
         c = np.sqrt(self.M_l) / self.mean_l
