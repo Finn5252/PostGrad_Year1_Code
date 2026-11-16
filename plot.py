@@ -10,7 +10,7 @@ from scipy.interpolate import griddata
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation")
+RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
@@ -24,7 +24,7 @@ RHO = 1025.0 # fluid density
 
 LEADING_EDGE_X = 0.0 # position of LE in CFD domain 
 LEADING_EDGE_Y = 1.0
-DRAW_FOIL = True    # draw the analytic outline
+DRAW_FOIL = True # draw the analytic outline
 
 MASK_RADIUS = 0.01 # grid points further than this from any cell centre are masked
 

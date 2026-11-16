@@ -24,7 +24,7 @@ from regularisation import REG_MODES, laplacian_penalty
 #settings
 
 H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
-OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation"
+OUT_DIR = r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov"
 
 
 CROP = (-0.2, 1.50, 0.80, 1.4) # xmin, xmax, ymin, ymax
@@ -35,7 +35,7 @@ TARGET_NORMALISATION = "freestream" # "none" or "freestream" (Cp and V / V_in, t
 RHO = 1025.0 # working fluid density for Cp
 
 EPOCHS = 1000
-BATCH_SIZE = 1 # number of batches during training
+BATCH_SIZE = 1 
 LR = 1e-3
 LR_SCHEDULE = "cosine" # "cosine" or "step"
 LR_MIN = 1e-5 # minimum cosine learning rate 
@@ -54,10 +54,10 @@ REG_LAMBDA = 0
 REG_MODE = "error" # "error" penalises roughness of prediction - target
 
 # pressure drag loss
-DRAG_WEIGHTING = "fixed" # "fixed", "cov" , or None 
+DRAG_WEIGHTING = "cov" # "fixed", "cov" , or None 
 DRAG_LAMBDA = 1.0 # fixed mode
-FIELD_LOSS_REF = 1e-5 # typical field loss
-DRAG_LOSS_REF = 1e-3 # typical drag error
+FIELD_LOSS_REF = 4.7e-6 # typical field loss
+DRAG_LOSS_REF = 2e-4 # typical drag error
 COV_WINDOW = None # optimiser steps averaged into each CoV observation; None = one epoch
 COV_WARMUP = None # optimiser steps at equal weights before CoV takes over; None = two windows
 
