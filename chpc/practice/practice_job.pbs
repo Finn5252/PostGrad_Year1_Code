@@ -1,0 +1,54 @@
+#!/bin/bash
+# ============================================================================
+# practice_job.pbs: a first test job for Lengau (PBS Pro).
+#
+# Lines starting with "#PBS" are instructions to the scheduler. Bash ignores them.
+# Everything after them runs on a compute node once PBS starts the job.
+#
+# The ONLY value you must change is the programme code on the "#PBS -P" line.
+#
+# What happens: the toy counts 60 steps at 5 s each (5 min of "work"), but stops
+# itself after 3 minutes and saves. Submit the script a second time and it resumes
+# and finishes. That is the same pattern your real training will need.
+# ============================================================================
+
+# Job name (shows in qstat; the output file is named toy_practice.o<number>)
+#PBS -N toy_practice
+
+# Research programme code. CHANGE THIS to yours (looks like ABCD1234).
+#PBS -P PROGRAMME_CODE
+
+# Small CPU queue: no GPU needed for this test
+#PBS -q serial
+
+# 1 node, 1 CPU core, 1 GB RAM
+#PBS -l select=1:ncpus=1:mem=1gb
+
+# Maximum run time (hh:mm:ss). PBS kills the job when it runs out.
+#PBS -l walltime=00:05:00
+
+# Put errors and normal output in the same file
+#PBS -j oe
+
+# ---- From here on: normal bash, running on the compute node ----
+set -e
+
+# Jobs start in your home folder. Go to the folder you ran qsub from.
+cd "$PBS_O_WORKDIR"
+
+echo "Job ID     : $PBS_JOBID"
+echo "Running on : $(hostname)"
+echo "Started at : $(date)"
+echo "Folder     : $(pwd)"
+
+# The toy only needs a plain Python 3, so the system python3 is enough here.
+echo "Python     : $(command -v python3) ($(python3 --version 2>&1))"
+
+OUT_DIR="$PBS_O_WORKDIR/toy_out"
+mkdir -p "$OUT_DIR"
+
+# -u = unbuffered, so toy.log updates live; >> appends to the log file
+python3 -u toy_counter.py --steps 60 --sleep 5 --out-dir "$OUT_DIR" \
+    --time-budget-min 3 >> "$OUT_DIR/toy.log" 2>&1
+
+echo "Finished at: $(date)"
