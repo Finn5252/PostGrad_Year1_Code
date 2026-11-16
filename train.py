@@ -56,9 +56,9 @@ REG_MODE = "error" # "error" penalises roughness of prediction - target, "predic
 SURFACE_LOSS = "cp" # None, "drag" or "cp"
 LOSS_WEIGHTING = "cov" # "fixed" or "cov"
 SURFACE_LAMBDA = 1.0 # weight of the surface term against the field term, once each is over its typical size
-FIELD_LOSS_REF = 2e-4 # typical field loss size
-DRAG_LOSS_REF = 1e-3 # typical drag loss size
-CP_LOSS_REF = 4e-5 # typical cp loss size
+FIELD_LOSS_REF = 4.7e-6 # typical field loss size
+DRAG_LOSS_REF = 2e-4 # typical drag loss size
+CP_LOSS_REF = 4.0e-5 # typical cp loss size
 COV_WINDOW = None # optimiser steps averaged into each CoV observation; None = one epoch
 COV_WARMUP = None # optimiser steps at equal weights before CoV takes over; None = two windows
 
