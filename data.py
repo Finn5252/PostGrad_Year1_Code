@@ -17,7 +17,7 @@ from scipy.spatial import cKDTree
 from torch_geometric.data import Data
 
 if TYPE_CHECKING:
-    from drag import PanelCache
+    from surface import PanelCache
 
 MIN_NODES_AFTER_CROP = 16   # a case with fewer than this inside the box is an error
 TARGET_NORMALISATIONS = ("none", "freestream")
@@ -49,12 +49,12 @@ class DataConfig:
     knn_k: int = 4
     cache_dir: str = "cache"
 
-    # KNN graph with gaussian weights, used by the loss only. None leaves it out
+    # KNN graph with gaussian weights, used by the loss only
     reg_k: Optional[int] = None
 
     # "freestream": pressure as Cp = p / (0.5 * rho * V_in^2) and velocity as V / V_in, before min-max scaling
     target_normalisation: str = "none"
-    rho: float = 1025.0 # working fluid density for Cp
+    rho: float = 1025.0 
 
     split_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1)
     split_seed: int = 0
@@ -115,7 +115,7 @@ class MinMaxScaler:
     data_max: Optional[np.ndarray] = None
 
     def partial_fit(self, batch: np.ndarray) -> "MinMaxScaler":
-        # "partial": fed one case at a time, so the rows never have to be held in memory to find a min and a max
+        # fed one case at a time, so the rows never have to be held in memory to find a min and a max
         batch = np.asarray(batch, dtype = np.float64)
         if batch.ndim != 2:
             raise ValueError (f"expected 2D array, got shape {batch.shape}")
@@ -349,7 +349,7 @@ class CaseStore:
                     f"case {i} (dp_id={dp_id}) has only {n_kept} nodes inside the crop "
                     f"box {crop}; minimum is {MIN_NODES_AFTER_CROP}"
                 )
-            # same boolean applied to both, therefore nodes and targets stay aligned
+            # same boolean applied to both
             nodes, targets = nodes[keep], targets[keep]
         return nodes, targets, scalars, dp_id
 
@@ -379,14 +379,14 @@ def knn_edge_index(xy: np.ndarray, k: int) -> np.ndarray:
     src = np.repeat(np.arange(n, dtype = np.int64), k_eff)
     dst = idx[:, 1:].reshape(-1).astype(np.int64)   # [:, 1:] drops the self-match
 
-    # Nearest-neighbour relations are not mutual - both directions are added and the duplicates created are then removed.
+    # Nearest-neighbour relations are not mutual. both directions are added and the duplicates created are then removed.
     src, dst = np.concatenate([src, dst]), np.concatenate([dst, src])
     keep = src != dst
     pairs = np.unique(np.stack([src[keep], dst[keep]], axis = 1), axis = 0)
     return pairs.T.astype(np.int64)
 
 def gaussian_knn_pairs(xy: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    "Gaussian-weighted KNN pairs (E, 2) with i < j, and their weights (E,), on raw coordinates in metres"
+    "Gaussian-weighted KNN pairs (E, 2) "
     n = xy.shape[0]
     k_eff = min(k, n - 1)
     if k_eff < 1:
@@ -543,7 +543,7 @@ class GraphDataset(torch.utils.data.Dataset):
         self.indices = list(indices)
         self.scalers = scalers
         self.reg_cache = reg_cache
-        # set by train.py when the drag loss is on
+        # set by train.py when a surface loss is on
         self.panel_cache = panel_cache
 
     def __len__(self) -> int:
@@ -572,7 +572,7 @@ class GraphDataset(torch.utils.data.Dataset):
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
         data.case_id = torch.tensor([i], dtype=torch.long)
-        # raw V_in, for converting back to physical units. 
+        # raw V_in, for converting back to physical units. No "index" in the name, or PyG offsets it when batching
         data.v_in = torch.tensor([v_in], dtype=torch.float64)
 
         if self.reg_cache is not None:
@@ -586,14 +586,16 @@ class GraphDataset(torch.utils.data.Dataset):
             data.reg_edge_weight = torch.from_numpy(np.array(w, dtype = np.float32))
 
         if self.panel_cache is not None:
-            cell, nx_ds = self.panel_cache[i]
+            cell, nx_ds, ds = self.panel_cache[i]
             if cell.size and int(cell.max()) >= nodes.shape[0]:
                 raise RuntimeError(
                     f"cached surface panels for case {i} reference node {int(cell.max())} "
                     f"but the cropped case has {nodes.shape[0]} nodes -- the cache is stale"
                 )
+            # "index" in the name is what makes PyG add each graph's node offset when batching
             data.panel_index = torch.from_numpy(np.ascontiguousarray(cell, dtype = np.int64))
             data.panel_nx_ds = torch.from_numpy(np.ascontiguousarray(nx_ds, dtype = np.float64))
+            data.panel_ds = torch.from_numpy(np.ascontiguousarray(ds, dtype = np.float64))
         return data
 
 def _split_indices(
@@ -616,7 +618,7 @@ def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig)
     for i in train_indices:
         nodes, targets, scalars, _ = store.cropped_case(int(i))
         node.partial_fit(nodes)
-        # fitted on the normalised targets
+        # fitted on the normalised targets, so the min-max scaling sits on top of Cp and V / V_in
         target.partial_fit(normalise_targets(targets, store.v_in(int(i)), cfg))
         scalar_rows.append(scalars)
     scalar.partial_fit(np.stack(scalar_rows))
