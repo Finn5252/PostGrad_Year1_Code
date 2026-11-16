@@ -8,9 +8,9 @@ from typing import Optional
 import torch
 import torch.nn as nn
 from torch import Tensor
-from torch_geometric.nn import GATConv, GCNConv, global_mean_pool
+from torch_geometric.nn import GATConv, GATv2Conv, GCNConv, global_mean_pool
 
-CONV_TYPES = ("gcn", "gat")
+CONV_TYPES = ("gcn", "gat", "gatv2")
 
 @dataclass
 class GCNSurrogateConfig:
@@ -37,11 +37,13 @@ def make_conv(in_dim: int, out_dim: int, cfg: GCNSurrogateConfig, last: bool = F
     "A graph convolution of the configured type, out_dim wide either way"
     if cfg.conv == "gcn":
         return GCNConv(in_dim, out_dim, add_self_loops = False)
+    Conv = GATv2Conv if cfg.conv == "gatv2" else GATConv
+    extra = {"share_weights": True} if cfg.conv == "gatv2" else {}
     if last:
-        # output layer: heads averaged, so the width stays n_outputs
-        return GATConv(in_dim, out_dim, heads = cfg.heads, concat = False, add_self_loops = False)
+        # heads averaged, so the width stays n_outputs
+        return Conv(in_dim, out_dim, heads = cfg.heads, concat = False, add_self_loops = False, **extra)
     # each head gives out_dim / heads features, concatenated back to out_dim
-    return GATConv(in_dim, out_dim // cfg.heads, heads = cfg.heads, add_self_loops = False)
+    return Conv(in_dim, out_dim // cfg.heads, heads = cfg.heads, add_self_loops = False, **extra)
 
 class SharedBlock(nn.Module):
     """shared GCN/FC block:
