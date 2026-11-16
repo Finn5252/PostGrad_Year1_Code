@@ -53,10 +53,10 @@ REG_LAMBDA = 0 # weight of the smoothing loss, 0 = not trained on
 REG_MODE = "error" # "error" penalises roughness of prediction - target, "prediction" of the prediction itself
 
 # additional loss
-SURFACE_LOSS = None # None, "drag" or "cp"
-LOSS_WEIGHTING = "fixed" # "fixed" or "cov"
+SURFACE_LOSS = "cp" # None, "drag" or "cp"
+LOSS_WEIGHTING = "cov" # "fixed" or "cov"
 SURFACE_LAMBDA = 1.0 # weight of the surface term against the field term, once each is over its typical size
-FIELD_LOSS_REF = 1e-5 # typical field loss size
+FIELD_LOSS_REF = 2e-4 # typical field loss size
 DRAG_LOSS_REF = 1e-3 # typical drag loss size
 CP_LOSS_REF = 4e-5 # typical cp loss size
 COV_WINDOW = None # optimiser steps averaged into each CoV observation; None = one epoch
