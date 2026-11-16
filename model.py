@@ -21,8 +21,8 @@ class GCNSurrogateConfig:
     hidden: int = 256 # neurons per layer
     n_shared_blocks: int = 4 # number of shared layer blocks
     n_gcn_blocks: int = 3 # number of gcn blocks with the exception of the final output convolution
-    conv: str = "gcn" # "gcn" (spectral convolution) or "gat" (graph attention)
-    heads: int = 4 # attention heads, gat only
+    conv: str = "gcn" # "gcn", "gat" or "gatv2" 
+    heads: int = 4 # attention heads
     def __post_init__(self) -> None:
         if self.n_shared_blocks < 1:
             raise ValueError("n_shared_blocks must be >=1")
@@ -30,20 +30,22 @@ class GCNSurrogateConfig:
             raise ValueError("n_gcn_blocks must be >=1")
         if self.conv not in CONV_TYPES:
             raise ValueError(f"conv must be one of {CONV_TYPES}, got {self.conv!r}")
-        if self.conv == "gat" and self.hidden % self.heads != 0:
+        if self.conv in ("gat", "gatv2") and self.hidden % self.heads != 0:
             raise ValueError(f"hidden ({self.hidden}) must be divisible by heads ({self.heads})")
 
 def make_conv(in_dim: int, out_dim: int, cfg: GCNSurrogateConfig, last: bool = False) -> nn.Module:
     "A graph convolution of the configured type, out_dim wide either way"
     if cfg.conv == "gcn":
         return GCNConv(in_dim, out_dim, add_self_loops = False)
-    Conv = GATv2Conv if cfg.conv == "gatv2" else GATConv
-    extra = {"share_weights": True} if cfg.conv == "gatv2" else {}
+    if cfg.conv == "gat":
+        layer, extra = GATConv, {}
+    else:
+        layer, extra = GATv2Conv, {}
     if last:
         # heads averaged, so the width stays n_outputs
-        return Conv(in_dim, out_dim, heads = cfg.heads, concat = False, add_self_loops = False, **extra)
+        return layer(in_dim, out_dim, heads = cfg.heads, concat = False, add_self_loops = False, **extra)
     # each head gives out_dim / heads features, concatenated back to out_dim
-    return Conv(in_dim, out_dim // cfg.heads, heads = cfg.heads, add_self_loops = False, **extra)
+    return layer(in_dim, out_dim // cfg.heads, heads = cfg.heads, add_self_loops = False, **extra)
 
 class SharedBlock(nn.Module):
     """shared GCN/FC block:
