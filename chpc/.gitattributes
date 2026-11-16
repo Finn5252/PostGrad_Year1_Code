@@ -1,5 +1,0 @@
-# Keep Linux (LF) line endings on files that run on the cluster.
-# Windows (CRLF) endings make job scripts fail with "/bin/bash^M: bad interpreter".
-*.pbs  text eol=lf
-*.sh   text eol=lf
-*.py   text eol=lf
