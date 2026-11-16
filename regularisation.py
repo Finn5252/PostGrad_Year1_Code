@@ -1,7 +1,7 @@
 # libraries
+
 from __future__ import annotations
 
-import torch
 from torch import Tensor
 
 REG_MODES = ("error", "prediction")
@@ -13,6 +13,7 @@ def laplacian_penalty(
         edge_weight: Tensor, # (E,) Gaussian kernel values
         mode: str = "error",
 ) -> Tensor:
+    "Weighted mean squared difference between neighbouring nodes, of the error or of the prediction"
     if mode not in REG_MODES:
         raise ValueError(f"mode must be one of {REG_MODES}, got {mode!r}")
     field = pred - target if mode == "error" else pred

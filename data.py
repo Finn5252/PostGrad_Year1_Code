@@ -16,6 +16,8 @@ import torch
 from scipy.spatial import cKDTree
 from torch_geometric.data import Data
 
+from settings import RHO
+
 if TYPE_CHECKING:
     from surface import PanelCache
 
@@ -38,7 +40,7 @@ class CropBox:
 class DataConfig:
     h5_path: str
 
-    #column names
+    # column names
     node_columns: Sequence[str] = ("x", "y", "cell_volume")
     target_columns: Sequence[str] = ("static_pressure", "velocity_magnitude")
     scalar_columns: Sequence[str] = ("m", "p", "t", "AoA", "V_in")
@@ -54,14 +56,14 @@ class DataConfig:
 
     # "freestream": pressure as Cp = p / (0.5 * rho * V_in^2) and velocity as V / V_in, before min-max scaling
     target_normalisation: str = "none"
-    rho: float = 1025.0 
+    rho: float = RHO # only used by the freestream normalisation
 
     split_fractions: tuple[float, float, float] = (0.8, 0.1, 0.1)
     split_seed: int = 0
 
     def __post_init__(self) -> None:
         if abs(sum(self.split_fractions) - 1.0) > 1e-9:
-            raise ValueError(f"split fractions must be sum to 1, got {self.split_fractions}")
+            raise ValueError(f"split fractions must sum to 1, got {self.split_fractions}")
         if self.knn_k < 1:
             raise ValueError("knn_k must be >=1")
         if self.reg_k is not None and self.reg_k < 1:
@@ -74,7 +76,7 @@ class DataConfig:
         for name in (self.x_column, self.y_column):
             if name not in self.node_columns:
                 raise ValueError(
-                    f"Coordinate column {name!r} must also be one of node_columns"
+                    f"Coordinate column {name!r} must also be one of node_columns "
                     f"{tuple(self.node_columns)}"
                 )
 
@@ -89,9 +91,7 @@ class DataConfig:
             "crop": asdict(self.crop) if self.crop is not None else None,
             "knn_k": self.knn_k,
         }
-        # sort_keys, or the same settings could hash differently between runs
-        blob = json.dumps(payload, sort_keys = True).encode()
-        return hashlib.sha256(blob).hexdigest()[:16]
+        return _hash(payload)
 
     def reg_cache_key(self, store_fingerprint: str, version: str) -> str:
         "Identifies a cached regularization graph. Kept separate, so the model's KNN cache is untouched"
@@ -104,8 +104,12 @@ class DataConfig:
             # changing the weighting formula must invalidate old caches
             "version": version,
         }
-        blob = json.dumps(payload, sort_keys = True).encode()
-        return hashlib.sha256(blob).hexdigest()[:16]
+        return _hash(payload)
+
+def _hash(payload: dict) -> str:
+    # sort_keys, or the same settings could hash differently between runs
+    blob = json.dumps(payload, sort_keys = True).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 # scaling
 
@@ -118,7 +122,7 @@ class MinMaxScaler:
         # fed one case at a time, so the rows never have to be held in memory to find a min and a max
         batch = np.asarray(batch, dtype = np.float64)
         if batch.ndim != 2:
-            raise ValueError (f"expected 2D array, got shape {batch.shape}")
+            raise ValueError(f"expected 2D array, got shape {batch.shape}")
         bmin, bmax = batch.min(axis = 0), batch.max(axis = 0)
         self.data_min = bmin if self.data_min is None else np.minimum(self.data_min, bmin)
         self.data_max = bmax if self.data_max is None else np.maximum(self.data_max, bmax)
@@ -164,7 +168,7 @@ class ScalerBundle:
     target_columns: list[str] = field(default_factory = list)
     scalar_columns: list[str] = field(default_factory = list)
     target_normalisation: str = "none"
-    rho: float = 1025.0
+    rho: float = RHO
 
     def save(self, path: str | Path) -> None:
         # Saved alongside every checkpoint
@@ -198,12 +202,12 @@ class ScalerBundle:
             scalar_columns = d["scalar_columns"],
             # runs saved before the setting existed were not normalised
             target_normalisation = d.get("target_normalisation", "none"),
-            rho = d.get("rho", 1025.0),
+            rho = d.get("rho", RHO),
         )
 
 # freestream normalisation
 
-def _freestream_reference(v_in, target_columns: Sequence[str], rho: float, like = None):
+def freestream_reference(v_in, target_columns: Sequence[str], rho: float, like = None):
     "Per-field reference, 0.5 * rho * V_in^2 for pressure and V_in for velocity, as an (N, d) array or tensor"
     if isinstance(like, torch.Tensor):
         # same device and dtype as the values it scales, so it also works on the GPU
@@ -230,9 +234,9 @@ def targets_to_physical(z, batch, scalers: ScalerBundle):
     v_in = batch.v_in
     if getattr(batch, "batch", None) is not None:
         v_in = v_in.to(batch.batch.device)[batch.batch]
-    return y * _freestream_reference(v_in, scalers.target_columns, scalers.rho, like = y)
+    return y * freestream_reference(v_in, scalers.target_columns, scalers.rho, like = y)
 
-#HDF5 access
+# HDF5 access
 
 def _decode_names(dataset) -> list[str]:
     return [v.decode() if isinstance(v, bytes) else str(v) for v in dataset[:]]
@@ -262,15 +266,16 @@ class CaseStore:
 
         with h5py.File(self.path, "r") as f:
             for required in (
-                "node_data", "node_offsets", "targets", "scalars", "dp_ids", "cell_ids", "node_columns", "target_columns", "scalar_columns",
+                "node_data", "node_offsets", "targets", "scalars", "dp_ids", "cell_ids",
+                "node_columns", "target_columns", "scalar_columns",
             ):
                 if required not in f:
-                    raise KeyError (f"dataset /{required} missing from {self.path}")
+                    raise KeyError(f"dataset /{required} missing from {self.path}")
 
             self.available_node_columns = _decode_names(f["node_columns"])
             self.available_target_columns = _decode_names(f["target_columns"])
             self.available_scalar_columns = _decode_names(f["scalar_columns"])
-            # read a case at a time.
+            # the small per-case arrays are read whole, node_data and targets stay on disk
             self.node_offsets = np.asarray(f["node_offsets"][:], dtype=np.int64)
             self.dp_ids = np.asarray(f["dp_ids"][:], dtype=np.int64)
             self.scalars_raw = np.asarray(f["scalars"][:], dtype=np.float64)
@@ -312,7 +317,7 @@ class CaseStore:
 
     @property
     def file(self) -> h5py.File:
-        # Opened on first use 
+        # opened on first use, so building a CaseStore does not hold the file open
         if self._file is None:
             self._file = h5py.File(self.path, "r")
         return self._file
@@ -361,7 +366,7 @@ def normalise_targets(targets: np.ndarray, v_in: float, cfg: DataConfig) -> np.n
     "Raw targets to the configured nondimensional form, before min-max scaling"
     if cfg.target_normalisation == "none":
         return targets
-    return targets / _freestream_reference(v_in, cfg.target_columns, cfg.rho)
+    return targets / freestream_reference(v_in, cfg.target_columns, cfg.rho)
 
 # graph construction and caching
 
@@ -372,7 +377,6 @@ def knn_edge_index(xy: np.ndarray, k: int) -> np.ndarray:
     if k_eff < 1:
         return np.zeros((2,0), dtype = np.int64)
 
-    # k-d tree
     tree = cKDTree(xy)
     _, idx = tree.query(xy, k = k_eff + 1)  # k+1 since a point is its own nearest match
     idx = np.atleast_2d(idx)
@@ -386,7 +390,7 @@ def knn_edge_index(xy: np.ndarray, k: int) -> np.ndarray:
     return pairs.T.astype(np.int64)
 
 def gaussian_knn_pairs(xy: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
-    "Gaussian-weighted KNN pairs (E, 2) "
+    "Unordered KNN pairs (E, 2) and the gaussian weight (E,) of each"
     n = xy.shape[0]
     k_eff = min(k, n - 1)
     if k_eff < 1:
@@ -405,6 +409,7 @@ def gaussian_knn_pairs(xy: np.ndarray, k: int) -> tuple[np.ndarray, np.ndarray]:
     # i chose j and j chose i collapse to one pair
     lo, hi = np.minimum(src, dst), np.maximum(src, dst)
     keep = lo != hi
+    # each pair packed into one integer, so np.unique can drop the duplicates
     code = np.unique(lo[keep] * n + hi[keep])
     lo, hi = code // n, code % n
 
@@ -436,7 +441,6 @@ class GraphCache:
             print(f"[data] building KNN graphs (k={self.cfg.knn_k}) -> {self.path}")
         edges = []
         for i in range(self.store.n_cases):
-            # cropped_case
             nodes, _, _, _ = self.store.cropped_case(i)
             xy = nodes[:, [self.store.x_pos, self.store.y_pos]]
             edges.append(knn_edge_index(xy, self.cfg.knn_k))
@@ -502,13 +506,6 @@ class RegGraphCache:
                 pairs.tofile(fp)
                 w.tofile(fw)
                 offsets.append(offsets[-1] + len(w))
-                if verbose and i == 0:
-                    q = np.quantile(w, [0.05, 0.5, 0.95])
-                    print(
-                        f"[data]   case 0: {xy.shape[0]} nodes, {len(w)} pairs "
-                        f"({2 * len(w) / xy.shape[0]:.1f} neighbours per node on average), "
-                        f"weights 5/50/95% = {q[0]:.2f}/{q[1]:.2f}/{q[2]:.2f}"
-                    )
                 if verbose and (i + 1) % 100 == 0:
                     print(f"[data]   {i + 1}/{self.store.n_cases} cases")
 
@@ -556,7 +553,8 @@ class GraphDataset(torch.utils.data.Dataset):
         edge_index = self.cache[i]
         if edge_index.size and edge_index.max() >= nodes.shape[0]:
             raise RuntimeError(
-                f"cached graph for case {i} references node {int(edge_index.max())} but the cropped case has {nodes.shape[0]} nodes -- the cache is stale for this crop configuration"
+                f"cached graph for case {i} references node {int(edge_index.max())} "
+                f"but the cropped case has {nodes.shape[0]} nodes -- the cache is stale for this crop configuration"
             )
 
         v_in = self.store.v_in(i)
@@ -568,7 +566,7 @@ class GraphDataset(torch.utils.data.Dataset):
             y = torch.from_numpy(self.scalers.target.transform(targets)),
             num_nodes = nodes.shape[0]
         )
-        # [None, :] makes it (1, 5) rather than (5,) 
+        # [None, :] makes it (1, 5) rather than (5,), so batching stacks one row per case
         data.scalars = torch.from_numpy(self.scalers.scalar.transform(scalars[None, :]))
         data.dp_id = torch.tensor([dp_id], dtype=torch.long)
         data.case_id = torch.tensor([i], dtype=torch.long)
@@ -614,7 +612,6 @@ def fit_scalers(store: CaseStore, train_indices: Sequence[int], cfg: DataConfig)
     node, target, scalar = MinMaxScaler(), MinMaxScaler(), MinMaxScaler()
 
     scalar_rows = []
-    # train_indices only
     for i in train_indices:
         nodes, targets, scalars, _ = store.cropped_case(int(i))
         node.partial_fit(nodes)
@@ -658,18 +655,6 @@ def build_splits(
         print(
             f"[data] {store.n_cases} cases -> "
             f"{len(train_idx)} train / {len(val_idx)} val / {len(test_idx)} test"
-        )
-        if cfg.crop is not None:
-            print(f"[data] crop box: {cfg.crop}")
-        print(f"[data] target normalisation: {cfg.target_normalisation}")
-        print(
-            "[data] target min/max (fitted on train, after crop): "
-            + ", ".join(
-                f"{n}=[{lo:.4g}, {hi:.4g}]"
-                for n, lo, hi in zip(
-                    cfg.target_columns, scalers.target.data_min, scalers.target.data_max
-                )
-            )
         )
 
     return (

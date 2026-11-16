@@ -1,4 +1,4 @@
-#libraries
+# libraries
 
 from __future__ import annotations
 
@@ -21,8 +21,9 @@ class GCNSurrogateConfig:
     hidden: int = 256 # neurons per layer
     n_shared_blocks: int = 4 # number of shared layer blocks
     n_gcn_blocks: int = 3 # number of gcn blocks with the exception of the final output convolution
-    conv: str = "gcn" # "gcn", "gat" or "gatv2" 
+    conv: str = "gcn" # "gcn", "gat" or "gatv2"
     heads: int = 4 # attention heads
+
     def __post_init__(self) -> None:
         if self.n_shared_blocks < 1:
             raise ValueError("n_shared_blocks must be >=1")
@@ -37,6 +38,7 @@ def make_conv(in_dim: int, out_dim: int, cfg: GCNSurrogateConfig, last: bool = F
     "A graph convolution of the configured type, out_dim wide either way"
     if cfg.conv == "gcn":
         return GCNConv(in_dim, out_dim, add_self_loops = False)
+    # extra holds keyword arguments for one attention type only, e.g. share_weights for gatv2. None are set at present
     if cfg.conv == "gat":
         layer, extra = GATConv, {}
     else:
@@ -59,7 +61,7 @@ class SharedBlock(nn.Module):
             graph_in: int,
             scalar_in: int,
             hidden: int,
-            skip_in: Optional [int],
+            skip_in: Optional[int],
             cfg: GCNSurrogateConfig,
     ) -> None:
         super().__init__()
@@ -70,8 +72,7 @@ class SharedBlock(nn.Module):
         self.conv = make_conv(graph_in, hidden, cfg)
         self.fc = nn.Linear(scalar_in, hidden)
 
-        # skip_in is none only for block 1, which has no preceding block to take a shortcut from.
-        # every where else the shortcut passes through a learned layer
+        # skip_in is None only for block 1, which has no preceding block. Everywhere else the shortcut passes through a learned layer
         self.skip_graph = nn.Linear(skip_in, hidden) if skip_in is not None else None
         self.skip_scalar = nn.Linear(skip_in, hidden) if skip_in is not None else None
         self.act = nn.ReLU()
@@ -87,7 +88,7 @@ class SharedBlock(nn.Module):
         n_graphs: int,
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         N = C.size(0)
-        # The graph width changes 3 - 512 - 512 through the stack. Checked explicitly for any errors. 
+        # the graph width changes through the stack (node features, then 2 * hidden), so the shapes are checked explicitly
         assert C.size(1) == self.graph_in, (
             f"graph signal C has {C.size(1)} features, expected {self.graph_in}"
         )
@@ -98,8 +99,7 @@ class SharedBlock(nn.Module):
             f"S has {S.size(0)} rows but the batch holds {n_graphs} graphs"
         )
 
-        # Mesh pathway. The convolution averages each cell with its four nearest neighbours
-        # The shortcut provides the distinctions that averaging would otherwise oversmooth
+        # Mesh pathway. The convolution averages each cell with its neighbours, the shortcut restores the detail that averaging smooths out
         G = self.conv(C, edge_index)
         if self.skip_graph is not None:
             G = G + self.skip_graph(Z)
@@ -111,25 +111,23 @@ class SharedBlock(nn.Module):
             T = T + self.skip_scalar(Q)
         T = self.act(T)
 
-        # Downward: pool the mesh to one row per case match shape
-        P = global_mean_pool (G, batch, size = n_graphs)
+        # Downward: pool the mesh to one row per case, the same shape as T
+        P = global_mean_pool(G, batch, size = n_graphs)
         # S_next carries both the case parameters and the pooled mesh
         S_next = P + T
         # Upward: copy each case's row to every one of its cells.
         U = S_next[batch]
-        # concatenated, for the next layer to weigh the spatial part and the case part separately. 
-        # doubles the width to 2 * hidden.
+        # concatenated so the next layer can weigh the spatial part and the case part separately. The width doubles to 2 * hidden
         C_next = torch.cat([G, U], dim=-1)
 
         assert C_next.shape == (N, 2 * self.hidden), (
             f"C_next has shape {tuple(C_next.shape)}, expected ({N}, {2 * self.hidden})"
         )
-        # C_next and S_next are the next block's inputs
-        # G and T are its shortcuts.
+        # C_next and S_next are the next block's inputs, G and T its shortcuts
         return C_next, S_next, G, T
 
 class GCNBlock(nn.Module):
-    "Residual GCN block:"
+    "Residual graph convolution block"
 
     def __init__(self, in_dim: int, hidden: int, cfg: GCNSurrogateConfig) -> None:
         super().__init__()
@@ -158,7 +156,7 @@ class GCNBlock(nn.Module):
         return out
 
 class GCNSurrogate(nn.Module):
-    "Shared-layer spectral GCN surrogate "
+    "Shared-layer GCN surrogate: shared blocks, then residual blocks, then an output convolution"
 
     def __init__(self, cfg: Optional[GCNSurrogateConfig] = None) -> None:
         super().__init__()
@@ -180,12 +178,12 @@ class GCNSurrogate(nn.Module):
         blocks = [GCNBlock(2 * H if j == 0 else H, H, cfg) for j in range(cfg.n_gcn_blocks)]
         self.gcn_blocks = nn.ModuleList(blocks)
 
-        # output convolution 
+        # output convolution
         self.out_conv = make_conv(H, cfg.n_outputs, cfg, last = True)
 
     def forward(
         self,
-        x: Tensor, # (N, n_node_features) 
+        x: Tensor, # (N, n_node_features)
         edge_index: Tensor, # (2, E) KNN connectivity
         scalars: Tensor, # (B, n_scalar_features) one row per case
         batch: Optional[Tensor] = None,
@@ -220,10 +218,10 @@ class GCNSurrogate(nn.Module):
 
         for block in self.shared_blocks:
             C, S, G, T = block(C, S, Z, Q, edge_index, batch, n_graphs)
-            # This block's outputs become the next block's shortcuts 
+            # This block's outputs become the next block's shortcuts
             Z, Q = G, T
 
-        # G is last shared block's pre-concatenation embedding,
+        # G is the last shared block's pre-concatenation embedding, hidden wide, so it serves as the first residual
         h = C
         for j, block in enumerate(self.gcn_blocks):
             h = block(h, edge_index, skip = G if j == 0 else None)

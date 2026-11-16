@@ -1,3 +1,5 @@
+# libraries
+
 from __future__ import annotations
 
 import csv
@@ -7,23 +9,23 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter
+from scipy.spatial import cKDTree
+
+from geometry import foil_outline
+from settings import RHO, RUN_DIR
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov")
 FIELD_DIR = RUN_DIR / "fields"
 FIG_DIR = RUN_DIR / "figures"
 PARITY_FILE = RUN_DIR / "parity_test.npz" # every case in the split, subsampled
-FORCES_FILE = RUN_DIR / "forces_test.json"  # forces.py
+FORCES_FILE = RUN_DIR / "forces_test.json" # written by forces.py
 
 GRID_N = 400 # interpolation grid resolution along x
 SMOOTH_SIGMA = 1.5 # gaussian smoothing of the interpolated grid
 N_CONTOURS = 25
 
-RHO = 1025.0 # fluid density
-
-LEADING_EDGE_X = 0.0 # position of LE in CFD domain 
-LEADING_EDGE_Y = 1.0
 DRAW_FOIL = True # draw the analytic outline
 
 MASK_RADIUS = 0.01 # grid points further than this from any cell centre are masked
@@ -35,7 +37,7 @@ FIELD_LABELS = {
     "static_pressure": ("Pressure", "kPa", 1e-3, "autumn_r"),
     "velocity_magnitude": ("Velocity magnitude", "m/s", 1.0, "viridis"),
 }
-DEFAULT_FIELD = ("", "", 1.0, "viridis")
+DEFAULT_FIELD = ("", "", 1.0, "viridis") # for a field with no entry above
 
 
 def load_case(path: Path) -> dict:
@@ -63,8 +65,7 @@ def to_grid(x, y, values):
 
     ZI = griddata((x, y), values, (XI, YI), method = "linear")
 
-    # Mask grid points with no nearby data
-    from scipy.spatial import cKDTree
+    # mask grid points with no nearby data, e.g. inside the foil
     tree = cKDTree(np.stack([x, y], axis = 1))
     dist, _ = tree.query(np.stack([XI.ravel(), YI.ravel()], axis = 1))
     ZI = np.ma.masked_where(
@@ -72,8 +73,7 @@ def to_grid(x, y, values):
     )
 
     if SMOOTH_SIGMA > 0:
-        # Normalised convolution
-        from scipy.ndimage import gaussian_filter
+        # normalised convolution: values and mask are smoothed separately and divided, so masked cells do not leak in
         filled = ZI.filled(np.nan)
         valid = ~np.isnan(filled)
         smoothed = filled.copy()
@@ -87,55 +87,14 @@ def to_grid(x, y, values):
     return XI, YI, ZI
 
 
-def naca4_profile(m: float, p: float, t: float, n: int = 200) -> np.ndarray:
-    "Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates."
-    beta = np.linspace(0.0, np.pi, n)
-    x = 0.5 * (1.0 - np.cos(beta))
-
-    yt = 5.0 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2 + 0.2843 * x**3 - 0.1015 * x**4)
-
-    if m == 0.0 or p == 0.0:
-        yc = np.zeros_like(x) #symmetric section
-        dyc = np.zeros_like(x)
-    else:
-        fore = x <= p
-        yc = np.where(fore,
-                      m / p**2 * (2 * p * x - x**2),
-                      m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
-        dyc = np.where(fore,
-                       2 * m / p**2 * (p - x),
-                       2 * m / (1 - p)**2 * (p - x))
-
-    # thickness added normal to the camber line
-    theta = np.arctan(dyc)
-    xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
-    xl, yl = x + yt * np.sin(theta), yc - yt * np.cos(theta)
-
-    # lower surface reversed
-    return np.concatenate([
-        np.stack([xu, yu], axis = 1),
-        np.stack([xl[::-1], yl[::-1]], axis = 1),
-    ])
-
-
-def foil_outline(case: dict) -> np.ndarray:
-    "The case's foil, rotated about the leading edge by the angle of attack and placed at the leading-edge position used in the CFD domain."
+def case_outline(case: dict) -> np.ndarray:
+    "The foil of a case, rebuilt from its scalars"
     names = case["scalar_columns"]
-    s = case["scalars"]
-    m = float(s[names.index("m")])
-    p = float(s[names.index("p")])
-    t = float(s[names.index("t")])
-    aoa = np.radians(float(s[names.index("AoA")]))
-
-    xy = naca4_profile(m, p, t)
-    c, sn = np.cos(-aoa), np.sin(-aoa)        
-    rot = np.stack([xy[:, 0] * c - xy[:, 1] * sn,
-                    xy[:, 0] * sn + xy[:, 1] * c], axis = 1)
-    return rot + np.array([LEADING_EDGE_X, LEADING_EDGE_Y])
+    return foil_outline(*(float(case["scalars"][names.index(n)]) for n in ("m", "p", "t", "AoA")))
 
 
 def draw_foil(ax, case: dict) -> None:
-    xy = foil_outline(case)
+    xy = case_outline(case)
     # z order 5 puts it over the contours
     ax.fill(xy[:, 0], xy[:, 1], facecolor = "white", edgecolor = "k",
             linewidth = 0.8, zorder = 5)
@@ -176,10 +135,8 @@ def plot_contours(case: dict, field_index: int) -> None:
 
     fig.suptitle(f"{label} -- {case_title(case)}", fontsize = 10)
     fig.tight_layout()
-    out = FIG_DIR / f"dp{case['dp_id']}_{name}_contours.png"
-    fig.savefig(out, dpi = DPI, bbox_inches = "tight")
+    fig.savefig(FIG_DIR / f"dp{case['dp_id']}_{name}_contours.png", dpi = DPI, bbox_inches = "tight")
     plt.close(fig)
-    print(f"[plot] {out.name}")
 
 
 def plot_error(case: dict, field_index: int) -> None:
@@ -191,7 +148,7 @@ def plot_error(case: dict, field_index: int) -> None:
     pred = case["pred"][:, field_index]
     true = case["true"][:, field_index]
 
-    # NMAPE
+    # the same per-case reference as the NMAPE in evaluate.py
     v_in = float(case["scalars"][case["scalar_columns"].index("V_in")])
     ref = v_in if name == "velocity_magnitude" else 0.5 * RHO * v_in**2
     nmape = 100.0 * float(np.abs(pred - true).mean() / ref)
@@ -202,8 +159,7 @@ def plot_error(case: dict, field_index: int) -> None:
 
     fig, ax = plt.subplots(figsize = (9, 4))
     XI, YI, ZD = to_grid(case["x"], case["y"], diff)
-    # diverging map on symmetric limits
-    # red is over-prediction, blue under
+    # diverging map on symmetric limits: red is over-prediction, blue under
     cf = ax.contourf(XI, YI, ZD, levels = np.linspace(-span, span, 41),
                      cmap = "RdBu_r", extend = "both")
     #ax.set_title(f"Predicted - actual   NMAPE = {nmape:.3f}%   "
@@ -251,6 +207,7 @@ def plot_parity() -> None:
                            cmap = "viridis", vmin = 0.0, vmax = 0.04,
                            rasterized = True)
 
+        # one range for both axes, so the 1:1 line runs corner to corner
         lo = min(ax[k].get_xlim()[0], ax[k].get_ylim()[0])
         hi = max(ax[k].get_xlim()[1], ax[k].get_ylim()[1])
         line = np.array([lo, hi])
@@ -267,10 +224,8 @@ def plot_parity() -> None:
     #fig.suptitle(f"Parity -- {n_cases} cases, {pred.shape[0]:,} points per field "
                  #f"(every {stride}th node)", fontsize = 10)
     fig.tight_layout()
-    out = FIG_DIR / "parity.png"
-    fig.savefig(out, dpi = DPI, bbox_inches = "tight")
+    fig.savefig(FIG_DIR / "parity.png", dpi = DPI, bbox_inches = "tight")
     plt.close(fig)
-    print(f"[plot] {out.name}  ({n_cases} cases)")
 
 
 def _force_panel(ax, true, pred, v_in, label, symbol, band):
@@ -354,11 +309,7 @@ def plot_force_parity() -> None:
     out = FIG_DIR / "force_parity.png"
     fig.savefig(out, dpi=DPI, bbox_inches="tight")
     plt.close(fig)
-    print(
-        f"[plot] {out.name}  Cl {rel_l:.2f}%, "
-        f"Cdp {rel_d:.2f}%"
-    )
-
+    print(f"[plot] {out.name}  Cl {rel_l:.2f}%, Cdp {rel_d:.2f}%")
 
 
 def plot_history() -> None:
@@ -378,7 +329,6 @@ def plot_history() -> None:
             lr.append(float(row["lr"]))
 
     fig, ax = plt.subplots(figsize = (8, 5))
-    # log scale
     ax.semilogy(epochs, train, linewidth = 0.8, label = "training")
     ax.semilogy(epochs, val, linewidth = 0.8, label = "validation")
     # all-NaN when LOG_TEST_EACH_EPOCH is False
@@ -391,7 +341,7 @@ def plot_history() -> None:
                 xy = (epochs[best], val[best]), xytext = (10, 20),
                 textcoords = "offset points", fontsize = 8)
 
-    # mark the learning-rate decay steps 
+    # mark the learning-rate decay steps
     #for i in range(1, len(lr)):
         #if lr[i] < lr[i - 1]:
             #ax.axvline(epochs[i], color = "grey", linestyle = "--", linewidth = 0.5)
@@ -401,10 +351,8 @@ def plot_history() -> None:
     ax.legend()
     ax.grid(True, which = "both", alpha = 0.2)
     fig.tight_layout()
-    out = FIG_DIR / "history.png"
-    fig.savefig(out, dpi = DPI, bbox_inches = "tight")
+    fig.savefig(FIG_DIR / "history.png", dpi = DPI, bbox_inches = "tight")
     plt.close(fig)
-    print(f"[plot] {out.name}  (dashed grey lines are LR decay steps)")
 
 
 def main() -> None:
@@ -416,7 +364,6 @@ def main() -> None:
             f"no .npz files in {FIELD_DIR} -- run evaluate.py with EXPORT_CASES > 0"
         )
     cases = [load_case(p) for p in paths]
-    print(f"[plot] {len(cases)} case(s) from {FIELD_DIR}")
 
     # two figures per field per case: the fields themselves, and where they differ
     for case in cases:

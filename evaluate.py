@@ -9,33 +9,29 @@ import numpy as np
 import torch
 from torch_geometric.loader import DataLoader
 
-from data import CropBox, DataConfig, ScalerBundle, build_splits, targets_to_physical
-from metrics import (NMAPEAccumulator, RelativeErrorAccumulator, RelativeErrorConfig,
-                     reference_values)
+from data import (CropBox, DataConfig, ScalerBundle, build_splits, freestream_reference,
+                  targets_to_physical)
+from metrics import NMAPEAccumulator, RelativeErrorAccumulator, RelativeErrorConfig
 from model import GCNSurrogate, GCNSurrogateConfig, count_parameters
+from settings import H5_PATH, RHO, RUN_DIR
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov")
-H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
+SPLIT = "test" # "train", "val" or "test"
+THRESHOLDS = [1e-4, 1e-3, 1e-2, 5e-2, 1e-1] # near-zero thresholds swept for the relative errors
+MODE = "mask" # "mask" or "floor", see RelativeErrorConfig
 
-SPLIT = "test" # train, val or test
-THRESHOLDS = [1e-4, 1e-3, 1e-2, 5e-2, 1e-1]
-MODE = "mask"  # floor
-
-RHO = 1025.0 # working fluid density for the NMAPE reference
-
-EXPORT_CASES = 3      
+EXPORT_CASES = 3 # full fields written for the first few cases, for plot.py. 0 turns it off
 EXPORT_DIR = RUN_DIR / "fields"
 
-PARITY_ALL = True # predicted vs actual for every test case
-PARITY_STRIDE = 1  
+PARITY_ALL = True # predicted vs actual for every case in the split
+PARITY_STRIDE = 1 # keep every n-th node in the parity file
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
-    "Rebuild the model and the data config from the run directory."
+def load_run(tag: str = "eval") -> tuple[GCNSurrogate, DataConfig]:
+    "Rebuild the model and the data config from the run directory"
     cfg_path = RUN_DIR / "config.json"
     if not cfg_path.exists():
         raise FileNotFoundError(f"no config.json in {RUN_DIR}")
@@ -55,7 +51,7 @@ def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
         split_seed = data_saved["split_seed"],
         # the run's own setting, not train.py's. Older runs were not normalised
         target_normalisation = data_saved.get("target_normalisation", "none"),
-        rho = data_saved.get("rho", 1025.0),
+        rho = data_saved.get("rho", RHO),
     )
     check_scalers(data_cfg, RUN_DIR)
 
@@ -65,9 +61,9 @@ def load_run() -> tuple[GCNSurrogate, DataConfig, dict]:
     ckpt = torch.load(RUN_DIR / "best.pt", map_location = DEVICE)
     model.load_state_dict(ckpt["model_state"])
     model.eval()
-    print(f"[eval] loaded epoch {ckpt['epoch']} (val loss {ckpt['val_loss']:.6e}), "
+    print(f"[{tag}] loaded epoch {ckpt['epoch']} (val loss {ckpt['val_loss']:.6e}), "
           f"{count_parameters(model):,} parameters on {DEVICE}")
-    return model, data_cfg, saved
+    return model, data_cfg
 
 
 def check_scalers(data_cfg: DataConfig, run_dir: Path) -> None:
@@ -84,17 +80,17 @@ def check_scalers(data_cfg: DataConfig, run_dir: Path) -> None:
 
 
 @torch.no_grad()
-def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConfig) -> dict:
-    "Two passes: field scale, then the errors themselves."
+def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConfig, device: str) -> dict:
+    "Relative L1/L2 per target field, in Pa and m/s. Two passes: field scale, then the errors themselves"
+    model.eval()
     acc = RelativeErrorAccumulator(scalers.target_columns, cfg)
     for batch in loader:
-        acc.update_scale(targets_to_physical(batch.y.to(DEVICE), batch, scalers))
+        acc.update_scale(targets_to_physical(batch.y.to(device), batch, scalers))
     acc.lock_scale()
 
     for batch in loader:
-        batch = batch.to(DEVICE)
+        batch = batch.to(device)
         pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
-        # both sides denormalized
         acc.update(
             targets_to_physical(pred, batch, scalers),
             targets_to_physical(batch.y, batch, scalers),
@@ -104,7 +100,7 @@ def relative_errors(model, loader, scalers: ScalerBundle, cfg: RelativeErrorConf
 
 @torch.no_grad()
 def nmape(model, loader, scalers: ScalerBundle) -> dict:
-    "Normalised by a per-case reference"
+    "Error as a percentage of a per-case reference: V_in for velocity, the dynamic pressure for pressure"
     acc = NMAPEAccumulator(scalers.target_columns)
     v_index = list(scalers.scalar_columns).index("V_in")
 
@@ -119,8 +115,8 @@ def nmape(model, loader, scalers: ScalerBundle) -> dict:
         offset = 0
         for g in range(scalars_phys.shape[0]):
             n = int((batch.batch == g).sum().item())
-            ref = reference_values(float(scalars_phys[g, v_index]),
-                                   scalers.target_columns, rho = RHO)
+            v_in = float(scalars_phys[g, v_index])
+            ref = freestream_reference(v_in, scalers.target_columns, scalers.rho)[0]
             acc.update(y_pred[offset:offset + n], y_true[offset:offset + n], ref)
             offset += n
     return acc.result()
@@ -142,20 +138,15 @@ def export_fields(model, dataset, scalers: ScalerBundle, n_cases: int) -> None:
         y_true = targets_to_physical(batch.y, batch, scalers).cpu().numpy()
         scalars_phys = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())[0]
 
-        out = EXPORT_DIR / f"dp{dp_id}.npz"
         np.savez_compressed(
-            out,
+            EXPORT_DIR / f"dp{dp_id}.npz",
             x = xy[:, 0], y = xy[:, 1],
             pred = y_pred, true = y_true,
             scalars = scalars_phys,
+            # dtype = object stores the names as strings, which plot.py reads back with allow_pickle
             target_columns = np.array(scalers.target_columns, dtype = object),
             scalar_columns = np.array(scalers.scalar_columns, dtype = object),
         )
-        err = np.abs(y_pred - y_true)
-        print(f"[eval] dp {dp_id}: {xy.shape[0]:,} nodes, max |error| "
-              + ", ".join(f"{n}={err[:, k].max():.4g}"
-                          for k, n in enumerate(scalers.target_columns))
-              + f" -> {out.name}")
 
 
 @torch.no_grad()
@@ -164,6 +155,7 @@ def export_parity(model, loader, scalers: ScalerBundle, path: Path, stride: int)
     preds, trues, cambers, dp_ids = [], [], [], []
     m_index = list(scalers.scalar_columns).index("m")
 
+    # assumes a batch size of 1, so each batch is one case
     for batch in loader:
         batch = batch.to(DEVICE)
         pred = model(batch.x, batch.edge_index, batch.scalars, batch.batch)
@@ -192,20 +184,18 @@ def export_parity(model, loader, scalers: ScalerBundle, path: Path, stride: int)
 
 
 def main() -> None:
-    model, data_cfg, saved = load_run()
+    model, data_cfg = load_run()
 
     train_ds, val_ds, test_ds, scalers, store = build_splits(data_cfg, verbose = False)
-    datasets = {"train": train_ds, "val": val_ds, "test": test_ds}
-    dataset = datasets[SPLIT]
+    dataset = {"train": train_ds, "val": val_ds, "test": test_ds}[SPLIT]
     loader = DataLoader(dataset, batch_size = 1)
     print(f"[eval] {SPLIT} split: {len(dataset)} cases")
 
-    # threshold sweep.
+    # threshold sweep, to show how much the relative errors depend on the near-zero cut-off
     rows = []
     for thr in THRESHOLDS:
         cfg = RelativeErrorConfig(mode = MODE, threshold = thr)
-        result = relative_errors(model, loader, scalers, cfg)
-        rows.append((thr, result))
+        rows.append((thr, relative_errors(model, loader, scalers, cfg, DEVICE)))
 
     names = list(scalers.target_columns)
     width = max(len(n) for n in names)
@@ -225,7 +215,7 @@ def main() -> None:
         print(line)
     print("=" * 78)
 
-    # the same model measured without a threshold 
+    # the same model measured without a threshold
     nm = nmape(model, loader, scalers)
     print("\n" + "=" * 78)
     print(f"NMAPE ({SPLIT} split)")
@@ -236,19 +226,14 @@ def main() -> None:
     print("=" * 78)
 
     (RUN_DIR / f"nmape_{SPLIT}.json").write_text(json.dumps(nm, indent = 2))
-
     (RUN_DIR / f"threshold_sweep_{SPLIT}.json").write_text(
         json.dumps({f"{thr:g}": r for thr, r in rows}, indent = 2)
     )
 
-    print()
     if EXPORT_CASES:
         export_fields(model, dataset, scalers, EXPORT_CASES)
-
     if PARITY_ALL:
-        EXPORT_DIR.mkdir(parents = True, exist_ok = True)
-        export_parity(model, loader, scalers,
-                      RUN_DIR / f"parity_{SPLIT}.npz", PARITY_STRIDE)
+        export_parity(model, loader, scalers, RUN_DIR / f"parity_{SPLIT}.npz", PARITY_STRIDE)
 
     store.close()
 

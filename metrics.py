@@ -1,4 +1,5 @@
-#libraries
+# libraries
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,11 +7,10 @@ from typing import Literal, Optional, Sequence
 
 import numpy as np
 import torch
-import torch.nn as nn
 from torch import Tensor
 
 class MeanAccumulator:
-    "Unweighted mean over cases"
+    "Running mean, each value weighted by the number of cases it covers"
     def __init__(self) -> None:
         self.total = 0.0
         self.count = 0
@@ -27,10 +27,10 @@ class MeanAccumulator:
 
 @dataclass
 class RelativeErrorConfig:
-    "Handling nodes whose ground truth value are close to 0"
+    "How nodes whose ground truth is close to 0 are handled"
 
-    mode: Literal["mask", "floor"] = "mask"
-    threshold_mode: Literal["relative_rms", "absolute"] = "relative_rms"
+    mode: Literal["mask", "floor"] = "mask" # "mask" leaves those nodes out, "floor" divides by the threshold instead
+    threshold_mode: Literal["relative_rms", "absolute"] = "relative_rms" # threshold as a fraction of the field RMS, or as a value
     threshold: float = 1e-3
 
     def describe(self) -> str:
@@ -45,7 +45,7 @@ class RelativeErrorAccumulator:
             field_names: Sequence[str],
             cfg: Optional[RelativeErrorConfig] = None,
     ) -> None:
-        self.field_names = list (field_names)
+        self.field_names = list(field_names)
         self.cfg = cfg or RelativeErrorConfig()
         d = len(self.field_names)
         self._sq_sum = np.zeros(d)
@@ -58,24 +58,23 @@ class RelativeErrorAccumulator:
         self._thresholds: Optional[np.ndarray] = None
 
     # pass 1: field scale
- 
+
     def update_scale(self, target: Tensor | np.ndarray) -> None:
         t = _to_numpy(target)
         self._sq_sum += (t**2).sum(axis = 0)
         self._sq_count += t.shape[0]
- 
+
     def lock_scale(self) -> None:
         cfg = self.cfg
         if cfg.threshold_mode == "absolute":
             self._thresholds = np.full(len(self.field_names), float(cfg.threshold))
         else:
-            with np.errstate(invalid = "ignore", divide = "ignore"):
-                rms = np.sqrt(self._sq_sum / np.maximum(self._sq_count, 1))
+            rms = np.sqrt(self._sq_sum / np.maximum(self._sq_count, 1)) # np.maximum guards an empty pass 1
             self._thresholds = cfg.threshold * rms
         self._scale_locked = True
- 
+
     # pass 2: errors
- 
+
     def update(self, pred: Tensor | np.ndarray, target: Tensor | np.ndarray) -> None:
         if not self._scale_locked:
             raise RuntimeError("call lock_scale() before update()")
@@ -84,11 +83,11 @@ class RelativeErrorAccumulator:
             raise ValueError(f"shape mismatch: {p.shape} vs {t.shape}")
         if p.shape[1] != len(self.field_names):
             raise ValueError(f"expected {len(self.field_names)} fields, got {p.shape[1]}")
- 
+
         diff = p - t
         mag = np.abs(t)
         self._total += p.shape[0]
- 
+
         for j in range(p.shape[1]):
             thr = self._thresholds[j]
             if self.cfg.mode == "mask":
@@ -102,9 +101,9 @@ class RelativeErrorAccumulator:
             self._l1_sum[j] += ratio.sum()
             self._l2_sum[j] += (ratio**2).sum()
             self._used[j] += int(ratio.size)
- 
+
     # results
- 
+
     def result(self) -> dict[str, dict[str, float]]:
         out: dict[str, dict[str, float]] = {}
         for j, name in enumerate(self.field_names):
@@ -172,23 +171,9 @@ class NMAPEAccumulator:
         return out
 
 
-def reference_values(
-    v_in: float, field_names: Sequence[str], rho: float = 1025.0
-) -> np.ndarray:
-    "Velocity is normalised by the inlet velocity, pressure by the dynamic pressure, since the outlet static pressure is zero."
-    dynamic = 0.5 * rho * v_in**2
-    lookup = {
-        "velocity_magnitude": v_in,
-        "static_pressure": dynamic,
-    }
-    missing = [n for n in field_names if n not in lookup]
-    if missing:
-        raise KeyError(f"no NMAPE reference defined for field(s) {missing}")
-    return np.array([lookup[n] for n in field_names], dtype = np.float64)
-
-
 def _to_numpy(a) -> np.ndarray:
     if isinstance(a, torch.Tensor):
         a = a.detach().cpu().numpy()
     a = np.asarray(a, dtype = np.float64)
+    # a single field given as (N,) becomes (N, 1)
     return a if a.ndim == 2 else a.reshape(-1, 1)

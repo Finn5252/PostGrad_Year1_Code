@@ -3,165 +3,56 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import numpy as np
 import torch
 from scipy.spatial import cKDTree
 from torch_geometric.loader import DataLoader
 
-from data import CropBox, DataConfig, build_splits, targets_to_physical
-from evaluate import check_scalers
-from model import GCNSurrogate, GCNSurrogateConfig
+from data import build_splits, targets_to_physical
+from evaluate import DEVICE, load_run
+from geometry import CHORD, MATCH_RADIUS, QUERY_OFFSET, foil_outline, panels
+from settings import RHO, RUN_DIR
 
 # settings
 
-RUN_DIR = Path(r"C:\Users\26664984\Documents\Masters\Model_training\cosine\Normalisation\dragloss_cov")
-H5_PATH = r"C:\Users\26664984\Documents\Masters\hdf5_training_data\iteration2\hydrofoil_rev2.h5"
+SPLIT = "test" # "train", "val" or "test"
 
-SPLIT = "test" # use test distribution 
-
-RHO = 1025.0 # working fluid density
-CHORD = 1.0 # reference length for the coefficients
-
-LEADING_EDGE_X = 0.0 # position of the leading edge in the CFD domain
-LEADING_EDGE_Y = 1.0
-
-N_PANELS = 200# outline points per surface
-QUERY_OFFSET = 1e-4 # how far outside the surface to look for the adjacent cell.
-
-
-
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-
-# geometry
-
-def naca4_profile(m: float, p: float, t: float, n: int = N_PANELS) -> np.ndarray:
-    "Closed NACA 4-digit outline, upper surface then lower, as (2n, 2) coordinates"
-    beta = np.linspace(0.0, np.pi, n)
-    x = 0.5 * (1.0 - np.cos(beta))
-
-    yt = 5.0 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2
-                    + 0.2843 * x**3 - 0.1015 * x**4)
-
-    if m == 0.0 or p == 0.0:
-        yc = np.zeros_like(x) # symmetric section
-        dyc = np.zeros_like(x)
-    else:
-        fore = x <= p
-        yc = np.where(fore,
-                      m / p**2 * (2 * p * x - x**2),
-                      m / (1 - p)**2 * ((1 - 2 * p) + 2 * p * x - x**2))
-        dyc = np.where(fore,
-                       2 * m / p**2 * (p - x),
-                       2 * m / (1 - p)**2 * (p - x))
-
-    # thickness added normal to the camber line
-    theta = np.arctan(dyc)
-    xu, yu = x - yt * np.sin(theta), yc + yt * np.cos(theta)
-    xl, yl = x + yt * np.sin(theta), yc - yt * np.cos(theta)
-
-    # lower surface reversed
-    return np.concatenate([
-        np.stack([xu, yu], axis = 1),
-        np.stack([xl[::-1], yl[::-1]], axis = 1),
-    ])
-
-
-def foil_outline(m: float, p: float, t: float, aoa_deg: float) -> np.ndarray:
-    "The outline rotated about the leading edge and placed in the CFD domain"
-    xy = naca4_profile(m, p, t)
-    a = np.radians(aoa_deg)
-    c, s = np.cos(-a), np.sin(-a) # negative: nose-up for a positive angle
-    rot = np.stack([xy[:, 0] * c - xy[:, 1] * s,
-                    xy[:, 0] * s + xy[:, 1] * c], axis = 1)
-    return rot + np.array([LEADING_EDGE_X, LEADING_EDGE_Y])
-
-
-def panels(outline: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    "Segment midpoints, outward unit normals and lengths."
-    a = outline
-    b = np.roll(outline, -1, axis = 0)  
-    d = b - a                          
-    length = np.linalg.norm(d, axis = 1)
-
-    keep = length > 1e-12 # drop zero-length segments, e.g. a sharp TE
-    a, b, d, length = a[keep], b[keep], d[keep], length[keep]
-
-    signed_area = 0.5 * np.sum(a[:, 0] * b[:, 1] - b[:, 0] * a[:, 1])
-    if signed_area > 0: # anticlockwise
-        normal = np.stack([d[:, 1], -d[:, 0]], axis = 1)
-    else: # clockwise
-        normal = np.stack([-d[:, 1], d[:, 0]], axis = 1)
-    normal /= length[:, None]
-
-    return 0.5 * (a + b), normal, length
-
-
-# forces
 
 def integrate(
     xy: np.ndarray,
     pressure: np.ndarray,
     outline: np.ndarray
 ) -> tuple[float, float, float]:
-    """Return (lift, pressure drag, fraction of panels matched)."""
+    "Return (lift, pressure drag, fraction of panels matched)"
     mid, normal, ds = panels(outline)
     tree = cKDTree(xy)
+    # the pressure on a panel is taken from the cell centre nearest to a point just outside it
     probe = mid + QUERY_OFFSET * normal
     dist, idx = tree.query(probe)
 
-    ok = dist < 50 * QUERY_OFFSET
+    ok = dist < MATCH_RADIUS
     if not ok.any():
         return float("nan"), float("nan"), 0.0
 
     p = pressure[idx[ok]]
-    force = -(p[:, None] * normal[ok] * ds[ok, None]).sum(axis=0)
+    # pressure pushes against the outward normal, hence the minus sign
+    force = -(p[:, None] * normal[ok] * ds[ok, None]).sum(axis = 0)
 
     return float(force[1]), float(force[0]), float(ok.mean())
 
 
-def lift_coefficient(lift: float, v_in: float) -> float:
-    return lift / (0.5 * RHO * v_in**2 * CHORD)
-
-def drag_coefficient(drag: float, v_in: float) -> float:
-    return drag / (0.5 * RHO * v_in**2 * CHORD)
-
-
-def load_run() -> tuple[GCNSurrogate, DataConfig]:
-    saved = json.loads((RUN_DIR / "config.json").read_text())
-    d = saved["data"]
-    crop = d.get("crop")
-    data_cfg = DataConfig(
-        h5_path = H5_PATH,
-        node_columns = tuple(d["node_columns"]),
-        target_columns = tuple(d["target_columns"]),
-        scalar_columns = tuple(d["scalar_columns"]),
-        crop = CropBox(**crop) if crop else None,
-        knn_k = d["knn_k"],
-        cache_dir = d["cache_dir"],
-        split_fractions = tuple(d["split_fractions"]),
-        split_seed = d["split_seed"],
-        target_normalisation = d.get("target_normalisation", "none"),
-        rho = d.get("rho", 1025.0),
-    )
-    check_scalers(data_cfg, RUN_DIR)
-    model = GCNSurrogate(GCNSurrogateConfig(**saved["model"])).to(DEVICE)
-    ckpt = torch.load(RUN_DIR / "best.pt", map_location = DEVICE)
-    model.load_state_dict(ckpt["model_state"])
-    model.eval()
-    print(f"[forces] loaded epoch {ckpt['epoch']} on {DEVICE}")
-    return model, data_cfg
+def force_coefficient(force: float, v_in: float) -> float:
+    "Lift or drag over the dynamic pressure times the chord"
+    return force / (0.5 * RHO * v_in**2 * CHORD)
 
 
 @torch.no_grad()
 def main() -> None:
-    model, data_cfg = load_run()
+    model, data_cfg = load_run(tag = "forces")
     train_ds, val_ds, test_ds, scalers, store = build_splits(data_cfg, verbose = False)
     dataset = {"train": train_ds, "val": val_ds, "test": test_ds}[SPLIT]
     loader = DataLoader(dataset, batch_size = 1)
-    print(f"[forces] {SPLIT} split: {len(dataset)} cases")
 
     names = list(scalers.scalar_columns)
     i_m, i_p, i_t = names.index("m"), names.index("p"), names.index("t")
@@ -178,20 +69,21 @@ def main() -> None:
         p_pred = targets_to_physical(pred, batch, scalers).cpu().numpy()[:, i_pressure]
         p_true = targets_to_physical(batch.y, batch, scalers).cpu().numpy()[:, i_pressure]
         s = scalers.scalar.inverse_transform(batch.scalars.cpu().numpy())[0]
+        v_in = float(s[i_v])
 
         outline = foil_outline(float(s[i_m]), float(s[i_p]), float(s[i_t]),
                                float(s[i_aoa]))
-        # The same integration applied to both
+        # the same integration applied to both, so its own error cancels in the comparison
         lift_p, drag_p, matched = integrate(xy, p_pred, outline)
         lift_t, drag_t, _ = integrate(xy, p_true, outline)
 
         rows.append({
             "dp_id": int(batch.dp_id[0].item()),
-            "V_in": float(s[i_v]),
-            "Cl_cfd": lift_coefficient(lift_t, float(s[i_v])),
-            "Cl_pred": lift_coefficient(lift_p, float(s[i_v])),
-            "Cdp_cfd": drag_coefficient(drag_t, float(s[i_v])),
-            "Cdp_pred": drag_coefficient(drag_p, float(s[i_v])),
+            "V_in": v_in,
+            "Cl_cfd": force_coefficient(lift_t, v_in),
+            "Cl_pred": force_coefficient(lift_p, v_in),
+            "Cdp_cfd": force_coefficient(drag_t, v_in),
+            "Cdp_pred": force_coefficient(drag_p, v_in),
             "panels_matched": matched,
         })
 
@@ -203,7 +95,7 @@ def main() -> None:
 
     def summary(true, pred, label):
         err = pred - true
-        rel = 100.0 * np.abs(err) / np.maximum(np.abs(true), 1e-12)
+        rel = 100.0 * np.abs(err) / np.maximum(np.abs(true), 1e-12) # np.maximum guards a CFD value of 0
         print(f"  {label}")
         print(f"    CFD range        {true.min():>9.4f} to {true.max():>9.4f}")
         print(f"    mean |error|     {np.abs(err).mean():>9.4f}  "
