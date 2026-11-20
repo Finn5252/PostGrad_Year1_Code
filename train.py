@@ -54,8 +54,8 @@ REG_MODE = "error" # "error" penalises roughness of prediction - target, "predic
 
 # additional loss
 SURFACE_LOSS = "cp" # None, "drag" or "cp"
-LOSS_WEIGHTING = "cov" # "fixed" or "cov"
-SURFACE_LAMBDA = 1.0 # weight of the surface term against the field term, once each is over its typical size
+LOSS_WEIGHTING = "fixed" # "fixed" or "cov"
+SURFACE_LAMBDA = 1.0 # weight of the surface term against the field term
 FIELD_LOSS_REF = 4.7e-6 # typical field loss size
 DRAG_LOSS_REF = 2e-4 # typical drag loss size
 CP_LOSS_REF = 4.0e-5 # typical cp loss size
@@ -65,9 +65,9 @@ COV_WARMUP = None # optimiser steps at equal weights before CoV takes over; None
 ZERO_HANDLING = "mask" # "mask" or "floor": how near-zero targets are treated in the relative errors
 ZERO_THRESHOLD = 1e-3 # as a fraction of the field RMS
 
-LOG_TEST_EACH_EPOCH = False # if true, test curve alongside train and validation loss
+LOG_TEST_EACH_EPOCH = False 
 
-SMOKE = False # for quick test runs: turns early stopping off. Shorten EPOCHS yourself
+SMOKE = False # smoke test
 
 
 # configuration
