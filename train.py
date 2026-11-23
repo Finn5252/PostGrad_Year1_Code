@@ -44,7 +44,7 @@ SEED = 0 # for replicability
 HIDDEN = 256 # neurons per layer
 SHARED_BLOCKS = 4 # shared GCN/FC blocks
 GCN_BLOCKS = 3 # residual GCN blocks after the shared ones
-CONV = "gcn" # "gcn", "gat" or "gatv2"
+CONV = "gatv2" # "gcn", "gat" or "gatv2"
 HEADS = 4 # attention heads
 
 # smoothness regularization
